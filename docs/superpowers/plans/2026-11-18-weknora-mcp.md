@@ -2811,7 +2811,7 @@ S3_USE_PATH_STYLE / S3_KEY_PREFIXES / S3_MAX_FILE_BYTES。
 
 ```bash
 docker run -d -p 8000:8000 \
-  -e WEKNORA_BASE_URL=http://your-weknora-host:28444 \
+  -e WEKNORA_BASE_URL=http://your-weknora-host:port \
   -e WEKNORA_WORKSPACE_MAP="ws-uuid-1:kb-uuid-1" \
   -e WEKNORA_WORKSPACE_ws-uuid-1_API_KEY=wk-xxx \
   -e MCP_AUTH_KEY=bearer-key \
@@ -2905,10 +2905,16 @@ jobs:
       - name: Smoke test (amd64 only)
         if: matrix.arch == 'amd64'
         run: |
-          WEKNORA_BASE_URL=http://weknora.invalid \
-          WEKNORA_WORKSPACE_MAP=smoke-ws:smoke-kb \
-          WEKNORA_WORKSPACE_smoke-ws_API_KEY=smoke-key \
-          MCP_AUTH_KEY=smoke-key MCP_PORT=8123 ./weknora-mcp > server.log 2>&1 &
+          # `env` launcher: the smoke workspace id contains hyphens
+          # (smoke-ws), and POSIX prefix-assignment syntax rejects
+          # hyphenated identifiers — bash would treat
+          # WEKNORA_WORKSPACE_smoke-ws_API_KEY=... as the command name.
+          env \
+            WEKNORA_BASE_URL=http://weknora.invalid \
+            WEKNORA_WORKSPACE_MAP=smoke-ws:smoke-kb \
+            WEKNORA_WORKSPACE_smoke-ws_API_KEY=smoke-key \
+            MCP_AUTH_KEY=smoke-key MCP_PORT=8123 \
+            ./weknora-mcp > server.log 2>&1 &
           server_pid=$!
           for i in $(seq 1 30); do
             curl -s -o /dev/null http://127.0.0.1:8123/health && break
@@ -3049,7 +3055,21 @@ git tag v0.1.0 && git push origin v0.1.0
 
 Watch the release workflow produce binaries + image; fix any workflow issues and re-tag if needed.
 
-- [ ] **Step 5: Final commit of any verification fixes**
+- [ ] **Step 5: Flip GHCR package visibility to public**
+
+GHCR creates new packages as **private** by default; `GITHUB_TOKEN` can push but
+cannot set visibility. Until flipped, the README's `docker pull
+ghcr.io/courage-zen/bigdata-mcp-weknora:v0.1.0` returns 401 for users.
+
+```bash
+gh api -X PATCH /user/packages/container/bigdata-mcp-weknora \
+  -f visibility=public
+```
+
+(Alternatively in the UI: Packages → bigdata-mcp-weknora → Package settings →
+Change visibility → Public. email-mcp's package was made public the same way.)
+
+- [ ] **Step 6: Final commit of any verification fixes**
 
 ```bash
 git add -A && git commit -m "chore: v0.1.0 verification fixes" || true
