@@ -1268,6 +1268,18 @@ func mapWeKnoraError(err error, mc map[string]string) []byte {
 	}
 	return errPayload(errCodeInternal, err.Error(), mc)
 }
+
+// validateKnowledgeID guards the path-bound knowledge_id parameter:
+// WeKnora knowledge IDs are opaque server-generated tokens, never
+// multi-segment (only wiki slugs are, and they go through WikiReadPage),
+// so / or .. in an ID is an attempt to reach another endpoint under the
+// workspace API key.
+func validateKnowledgeID(id string) error {
+	if strings.Contains(id, "/") || strings.Contains(id, "..") {
+		return fmt.Errorf("parameter \"knowledge_id\" must be a document id, not a path")
+	}
+	return nil
+}
 ```
 
 Tool registration + handlers. Each handler: extract args → resolveMapping → call WeKnoraCaller → payload. Registration happens on a `*mcp.Server` in `RegisterTools(server *mcp.Server, env *ServerEnv)`, mirroring email-mcp's `mcp.AddTool` wiring with `req.Extra.Header` for headers and `req.Params.Arguments` for raw args (same lenient-schema philosophy: schema is descriptive; validation in handler for uniform error codes).
@@ -1494,6 +1506,9 @@ func addRetrieveTools(server *mcp.Server, env *ServerEnv) {
 		knowledgeID, _ := args["knowledge_id"].(string)
 		if strings.TrimSpace(knowledgeID) == "" {
 			return errPayload(errCodeMissingParam, "parameter \"knowledge_id\" is required", mc)
+		}
+		if err := validateKnowledgeID(knowledgeID); err != nil {
+			return errPayload(errCodeInvalidParamValue, err.Error(), mc)
 		}
 		q := url.Values{}
 		page, pageSize := 1, 10
@@ -1830,6 +1845,9 @@ func addIngestTools(server *mcp.Server, env *ServerEnv) {
 		if strings.TrimSpace(knowledgeID) == "" {
 			return errPayload(errCodeMissingParam, "parameter \"knowledge_id\" is required", mc)
 		}
+		if err := validateKnowledgeID(knowledgeID); err != nil {
+			return errPayload(errCodeInvalidParamValue, err.Error(), mc)
+		}
 		content, _ := args["content"].(string)
 		if content == "" {
 			return errPayload(errCodeMissingParam, "parameter \"content\" is required", mc)
@@ -1867,6 +1885,9 @@ func addIngestTools(server *mcp.Server, env *ServerEnv) {
 		knowledgeID, _ := args["knowledge_id"].(string)
 		if strings.TrimSpace(knowledgeID) == "" {
 			return errPayload(errCodeMissingParam, "parameter \"knowledge_id\" is required", mc)
+		}
+		if err := validateKnowledgeID(knowledgeID); err != nil {
+			return errPayload(errCodeInvalidParamValue, err.Error(), mc)
 		}
 		resp, err := env.WeKnora.DeleteDocument(ctx, m, knowledgeID)
 		if err != nil {
@@ -2314,12 +2335,34 @@ func TestReadDocument_ChunkTypes(t *testing.T) {
 		t.Fatalf("chunk types: %v", types)
 	}
 }
+
+func TestKnowledgeIDTraversalRejected(t *testing.T) {
+	fake := &fakeWeKnoraCaller{}
+	env := testEnv(fake)
+	for _, id := range []string{"../../user/settings", "k1?admin=1", "a/b"} {
+		payload := envReadDocument(env, wsHeaders(), map[string]any{"knowledge_id": id})
+		if r := decodePayload(t, payload); r.ErrorCode != "INVALID_PARAM_VALUE" {
+			t.Fatalf("id %q: code = %q, want INVALID_PARAM_VALUE", id, r.ErrorCode)
+		}
+		if fake.readChunksID != "k-9" { // unchanged from the previous test
+			t.Fatalf("id %q reached the client", id)
+		}
+	}
+	// update_document and delete_document share the guard
+	payload := envUpdateDocument(env, wsHeaders(), map[string]any{"knowledge_id": "../x", "content": "c"})
+	if r := decodePayload(t, payload); r.ErrorCode != "INVALID_PARAM_VALUE" {
+		t.Fatalf("update: code = %q", r.ErrorCode)
+	}
+	payload = envDeleteDocument(env, wsHeaders(), map[string]any{"knowledge_id": "a/b"})
+	if r := decodePayload(t, payload); r.ErrorCode != "INVALID_PARAM_VALUE" {
+		t.Fatalf("delete: code = %q", r.ErrorCode)
+	}
+}
 ```
 
-- [ ] **Step 1: Write failing tests** (`tools_test.go`, code above)
-- [ ] **Step 2: Run** `go test ./tools_test.go` → Expected: FAIL (undefined symbols)
-- [ ] **Step 3: Write tools.go** (code above, handlers as named ServerEnv methods; add missing `envListDocuments`/`envReadDocument` helpers to the test file too)
-- [ ] **Step 4: Run** `go test ./tools_test.go` → Expected: PASS (7 tests)
+- [ ] **Step 1: Write failing tests** (`tools_test.go`, code above; run `go test . -count=1` → Expected: FAIL with undefined symbols — package mode, the single-file form doesn't compile)
+- [ ] **Step 3: Write tools.go** (code above, handlers as named ServerEnv methods; add missing `envListDocuments`/`envReadDocument`/`envUpdateDocument`/`envDeleteDocument` helpers to the test file too)
+- [ ] **Step 4: Run** `go test ./... -count=1` → Expected: PASS (8 tools tests; run in package mode — the single-file form doesn't compile)
 - [ ] **Step 5: Commit** `git add tools.go tools_test.go && git commit -m "feat: 10 mcp tools over weknora rest (retrieve+wiki+ingest)"`
 
 ---
