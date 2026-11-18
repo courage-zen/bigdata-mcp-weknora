@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -121,6 +122,9 @@ func TestWeKnoraClient_MultipartFileUpload(t *testing.T) {
 		if hdr.Filename != "report.csv" {
 			t.Errorf("file part filename = %q", hdr.Filename)
 		}
+		if ct := hdr.Header.Get("Content-Type"); ct != "text/csv" {
+			t.Errorf("file part content-type = %q", ct)
+		}
 		if r.FormValue("fileName") != "report.csv" {
 			t.Errorf("fileName = %q", r.FormValue("fileName"))
 		}
@@ -140,5 +144,80 @@ func TestWeKnoraClient_MultipartFileUpload(t *testing.T) {
 	json.Unmarshal(raw, &k)
 	if k.ID != "k9" {
 		t.Fatalf("id = %q", k.ID)
+	}
+}
+
+func TestWeKnoraClient_PathEscaping(t *testing.T) {
+	var gotPath, gotQuery string
+	c, m := fakeWeKnora(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotQuery = r.URL.Path, r.URL.RawQuery
+		io.WriteString(w, `{"slug":"x","title":"x","out_links":[]}`)
+	})
+	// % in a slug previously failed request-build; ? previously leaked
+	// into the query string; both must stay in the path, percent-escaped.
+	if _, err := c.WikiReadPage(context.Background(), m, "entity/50%load?x=1"); err != nil {
+		t.Fatal(err)
+	}
+	if want := "/api/v1/knowledgebase/kb-1/wiki/pages/entity/50%load?x=1"; gotPath != want {
+		t.Errorf("path = %q, want %q", gotPath, want)
+	}
+	if gotQuery != "" {
+		t.Errorf("query = %q, want empty", gotQuery)
+	}
+	// Multi-segment slugs keep their slashes: entity/rag stays two segments.
+	if _, err := c.WikiReadPage(context.Background(), m, "entity/rag"); err != nil {
+		t.Fatal(err)
+	}
+	if want := "/api/v1/knowledgebase/kb-1/wiki/pages/entity/rag"; gotPath != want {
+		t.Errorf("path = %q, want %q", gotPath, want)
+	}
+}
+
+func TestWeKnoraClient_ResponseCap(t *testing.T) {
+	c, m := fakeWeKnora(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Write(bytes.Repeat([]byte("x"), 16<<20+1024))
+	})
+	_, err := c.ListKnowledgeBases(context.Background(), m)
+	if err == nil || !strings.Contains(err.Error(), "16 MiB cap") {
+		t.Fatalf("want cap error, got %v", err)
+	}
+}
+
+func TestWeKnoraClient_CtxCanceled(t *testing.T) {
+	c, m := fakeWeKnora(t, func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"success":true,"data":[]}`)
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := c.ListKnowledgeBases(ctx, m); err != context.Canceled {
+		t.Fatalf("want context.Canceled, got %v", err)
+	}
+}
+
+func TestWeKnoraClient_SuccessFalseIsError(t *testing.T) {
+	c, m := fakeWeKnora(t, func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"success":false,"error":{"message":"kb not found"}}`)
+	})
+	if _, err := c.ListKnowledgeBases(context.Background(), m); err == nil || !strings.Contains(err.Error(), "success=false") {
+		t.Fatalf("want success=false error, got %v", err)
+	}
+}
+
+func TestWeKnoraClient_NoRedirectFollow(t *testing.T) {
+	var targetHits int
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		targetHits++
+		io.WriteString(w, `{"success":true,"data":[]}`)
+	}))
+	defer target.Close()
+	c, m := fakeWeKnora(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Location", target.URL+"/api/v1/knowledge-bases")
+		w.WriteHeader(http.StatusFound)
+	})
+	if _, err := c.ListKnowledgeBases(context.Background(), m); err == nil {
+		t.Fatal("redirect body must not decode as a success envelope")
+	}
+	if targetHits != 0 {
+		t.Fatalf("redirect was followed: %d hits on the redirect target", targetHits)
 	}
 }

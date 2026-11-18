@@ -8,13 +8,20 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"net/textproto"
 	"net/url"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 const weknoraTimeout = 30 * time.Second
+
+// maxResponseBytes caps how much of any WeKnora response is read; a body
+// beyond it is rejected with an explicit error instead of surfacing as a
+// confusing JSON decode failure on truncated data.
+const maxResponseBytes = 16 << 20
 
 // weknoraError carries the HTTP status and the message extracted from a
 // WeKnora error body (both body shapes handled).
@@ -41,6 +48,8 @@ type WeKnoraCaller interface {
 	DeleteDocument(ctx context.Context, m *WorkspaceMapping, knowledgeID string) (map[string]any, error)
 }
 
+var _ WeKnoraCaller = (*weknoraClient)(nil)
+
 // weknoraClient is the HTTP implementation over one shared http.Client.
 type weknoraClient struct {
 	base string
@@ -50,7 +59,15 @@ type weknoraClient struct {
 func NewWeKnoraClient(baseURL string) *weknoraClient {
 	return &weknoraClient{
 		base: strings.TrimRight(baseURL, "/"),
-		hc:   &http.Client{Timeout: weknoraTimeout},
+		hc: &http.Client{
+			Timeout: weknoraTimeout,
+			// Never follow redirects: Go's client only strips Authorization
+			// and Cookie headers cross-host, so a 3xx from a gateway would
+			// hand the workspace API key to whatever host the redirect names.
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
 	}
 }
 
@@ -74,12 +91,15 @@ func (w *weknoraClient) do(ctx context.Context, m *WorkspaceMapping, method, pat
 		return nil, fmt.Errorf("weknora request failed: %w", err)
 	}
 	defer resp.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20)) // 16 MiB response cap
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("read weknora response: %w", err)
 	}
+	if len(data) > maxResponseBytes {
+		return nil, fmt.Errorf("weknora response exceeded the %d MiB cap", maxResponseBytes>>20)
+	}
 	if resp.StatusCode >= 400 {
-		return nil, &weknoraError{Status: resp.StatusCode, Message: extractWeKnoraMessage(data)}
+		return nil, &weknoraError{Status: resp.StatusCode, Message: snippet([]byte(extractWeKnoraMessage(data)))}
 	}
 	return data, nil
 }
@@ -124,7 +144,7 @@ func unwrapData(raw []byte) ([]json.RawMessage, error) {
 		return nil, fmt.Errorf("decode weknora response: %w", err)
 	}
 	if !env.Success {
-		return nil, fmt.Errorf("weknora response success=false")
+		return nil, fmt.Errorf("weknora response success=false: %s", snippet(raw))
 	}
 	return env.Data, nil
 }
@@ -139,7 +159,7 @@ func unwrapDataObject(raw []byte) (json.RawMessage, error) {
 		return nil, fmt.Errorf("decode weknora response: %w", err)
 	}
 	if !env.Success {
-		return nil, fmt.Errorf("weknora response success=false")
+		return nil, fmt.Errorf("weknora response success=false: %s", snippet(raw))
 	}
 	return env.Data, nil
 }
@@ -161,7 +181,7 @@ func (w *weknoraClient) SearchKnowledge(ctx context.Context, m *WorkspaceMapping
 }
 
 func (w *weknoraClient) ListDocuments(ctx context.Context, m *WorkspaceMapping, query url.Values) ([]json.RawMessage, int, error) {
-	raw, err := w.do(ctx, m, http.MethodGet, "/api/v1/knowledge-bases/"+m.KBID+"/knowledge?"+query.Encode(), "", nil)
+	raw, err := w.do(ctx, m, http.MethodGet, "/api/v1/knowledge-bases/"+pathSegments(m.KBID)+"/knowledge?"+query.Encode(), "", nil)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -177,7 +197,7 @@ func (w *weknoraClient) ListDocuments(ctx context.Context, m *WorkspaceMapping, 
 }
 
 func (w *weknoraClient) ReadChunks(ctx context.Context, m *WorkspaceMapping, knowledgeID string, query url.Values) ([]json.RawMessage, int, error) {
-	raw, err := w.do(ctx, m, http.MethodGet, "/api/v1/chunks/"+knowledgeID+"?"+query.Encode(), "", nil)
+	raw, err := w.do(ctx, m, http.MethodGet, "/api/v1/chunks/"+pathSegments(knowledgeID)+"?"+query.Encode(), "", nil)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -194,7 +214,7 @@ func (w *weknoraClient) ReadChunks(ctx context.Context, m *WorkspaceMapping, kno
 
 func (w *weknoraClient) WikiSearch(ctx context.Context, m *WorkspaceMapping, q string, limit int) ([]json.RawMessage, error) {
 	raw, err := w.do(ctx, m, http.MethodGet,
-		"/api/v1/knowledgebase/"+m.KBID+"/wiki/search?"+url.Values{"q": {q}, "limit": {strconv.Itoa(limit)}}.Encode(), "", nil)
+		"/api/v1/knowledgebase/"+pathSegments(m.KBID)+"/wiki/search?"+url.Values{"q": {q}, "limit": {strconv.Itoa(limit)}}.Encode(), "", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -208,8 +228,9 @@ func (w *weknoraClient) WikiSearch(ctx context.Context, m *WorkspaceMapping, q s
 }
 
 func (w *weknoraClient) WikiReadPage(ctx context.Context, m *WorkspaceMapping, slug string) (map[string]any, error) {
-	// slug is a catch-all path segment: entity/rag → /pages/entity/rag
-	raw, err := w.do(ctx, m, http.MethodGet, "/api/v1/knowledgebase/"+m.KBID+"/wiki/pages/"+slug, "", nil)
+	// slugs are multi-segment path identifiers; each segment is
+	// percent-escaped, slashes preserved.
+	raw, err := w.do(ctx, m, http.MethodGet, "/api/v1/knowledgebase/"+pathSegments(m.KBID)+"/wiki/pages/"+pathSegments(slug), "", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -222,7 +243,7 @@ func (w *weknoraClient) WikiReadPage(ctx context.Context, m *WorkspaceMapping, s
 
 func (w *weknoraClient) WikiIndex(ctx context.Context, m *WorkspaceMapping, limit int) (map[string]any, error) {
 	raw, err := w.do(ctx, m, http.MethodGet,
-		"/api/v1/knowledgebase/"+m.KBID+"/wiki/index?"+url.Values{"limit": {strconv.Itoa(limit)}}.Encode(), "", nil)
+		"/api/v1/knowledgebase/"+pathSegments(m.KBID)+"/wiki/index?"+url.Values{"limit": {strconv.Itoa(limit)}}.Encode(), "", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -234,7 +255,7 @@ func (w *weknoraClient) WikiIndex(ctx context.Context, m *WorkspaceMapping, limi
 }
 
 func (w *weknoraClient) AddManualDocument(ctx context.Context, m *WorkspaceMapping, title, content string, publish bool) (json.RawMessage, error) {
-	raw, err := w.doJSON(ctx, m, http.MethodPost, "/api/v1/knowledge-bases/"+m.KBID+"/manual", map[string]any{
+	raw, err := w.doJSON(ctx, m, http.MethodPost, "/api/v1/knowledge-bases/"+pathSegments(m.KBID)+"/manual", map[string]any{
 		"title":   title,
 		"content": content,
 		"status":  manualStatus(publish),
@@ -251,7 +272,7 @@ func (w *weknoraClient) AddURLDocument(ctx context.Context, m *WorkspaceMapping,
 	if title != "" {
 		body["title"] = title
 	}
-	raw, err := w.doJSON(ctx, m, http.MethodPost, "/api/v1/knowledge-bases/"+m.KBID+"/url", body)
+	raw, err := w.doJSON(ctx, m, http.MethodPost, "/api/v1/knowledge-bases/"+pathSegments(m.KBID)+"/url", body)
 	if err != nil {
 		return nil, err
 	}
@@ -261,7 +282,15 @@ func (w *weknoraClient) AddURLDocument(ctx context.Context, m *WorkspaceMapping,
 func (w *weknoraClient) AddFileDocument(ctx context.Context, m *WorkspaceMapping, filename string, content []byte, contentType string) (json.RawMessage, error) {
 	var buf bytes.Buffer
 	mw := multipart.NewWriter(&buf)
-	fw, err := mw.CreateFormFile("file", filename)
+	hdr := textproto.MIMEHeader{}
+	hdr.Set("Content-Disposition",
+		fmt.Sprintf(`form-data; name="file"; filename="%s"`, escapeQuotes(filename)))
+	if contentType != "" {
+		hdr.Set("Content-Type", contentType)
+	} else {
+		hdr.Set("Content-Type", "application/octet-stream")
+	}
+	fw, err := mw.CreatePart(hdr)
 	if err != nil {
 		return nil, fmt.Errorf("build multipart: %w", err)
 	}
@@ -273,7 +302,7 @@ func (w *weknoraClient) AddFileDocument(ctx context.Context, m *WorkspaceMapping
 	if err := mw.Close(); err != nil {
 		return nil, fmt.Errorf("build multipart: %w", err)
 	}
-	raw, err := w.do(ctx, m, http.MethodPost, "/api/v1/knowledge-bases/"+m.KBID+"/file", mw.FormDataContentType(), &buf)
+	raw, err := w.do(ctx, m, http.MethodPost, "/api/v1/knowledge-bases/"+pathSegments(m.KBID)+"/file", mw.FormDataContentType(), &buf)
 	if err != nil {
 		return nil, err
 	}
@@ -285,7 +314,7 @@ func (w *weknoraClient) UpdateDocument(ctx context.Context, m *WorkspaceMapping,
 	if title != "" {
 		body["title"] = title
 	}
-	raw, err := w.doJSON(ctx, m, http.MethodPut, "/api/v1/knowledge/manual/"+knowledgeID, body)
+	raw, err := w.doJSON(ctx, m, http.MethodPut, "/api/v1/knowledge/manual/"+pathSegments(knowledgeID), body)
 	if err != nil {
 		return nil, err
 	}
@@ -293,7 +322,7 @@ func (w *weknoraClient) UpdateDocument(ctx context.Context, m *WorkspaceMapping,
 }
 
 func (w *weknoraClient) DeleteDocument(ctx context.Context, m *WorkspaceMapping, knowledgeID string) (map[string]any, error) {
-	raw, err := w.do(ctx, m, http.MethodDelete, "/api/v1/knowledge/"+knowledgeID, "", nil)
+	raw, err := w.do(ctx, m, http.MethodDelete, "/api/v1/knowledge/"+pathSegments(knowledgeID), "", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -312,10 +341,34 @@ func manualStatus(publish bool) string {
 	return "draft"
 }
 
-// snippet returns up to 200 bytes of a raw response for error messages.
+// snippet returns up to 200 bytes of a raw response for error messages,
+// backing up to a rune boundary so multi-byte text isn't split mid-character.
 func snippet(raw []byte) string {
 	if len(raw) > 200 {
-		return string(raw[:200]) + "..."
+		cut := 200
+		for cut > 0 && !utf8.RuneStart(raw[cut]) {
+			cut--
+		}
+		return string(raw[:cut]) + "..."
 	}
 	return string(raw)
+}
+
+// pathSegments percent-escapes each /-separated segment of a path
+// parameter while preserving the slash structure: wiki slugs are
+// multi-segment identifiers (entity/rag → two escaped segments), so
+// url.PathEscape alone would wrongly escape the separators too.
+// knowledgeID and KBID go through the same helper for uniformity.
+func pathSegments(s string) string {
+	parts := strings.Split(s, "/")
+	for i, p := range parts {
+		parts[i] = url.PathEscape(p)
+	}
+	return strings.Join(parts, "/")
+}
+
+// escapeQuotes makes a value safe inside a quoted Content-Disposition
+// parameter (same escaping as Go's mime/multipart CreateFormFile).
+func escapeQuotes(s string) string {
+	return strings.NewReplacer("\\", "\\\\", `"`, `\"`).Replace(s)
 }
