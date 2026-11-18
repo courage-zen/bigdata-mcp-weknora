@@ -3037,9 +3037,9 @@ Note: the smoke test asserts the **error path** (`WEKNORA_API_FAILED` against th
 
 ## Task 8: Full verification + GitHub repo
 
-- [ ] **Step 1: Run full suite** `go vet ./... && go test ./...` → Expected: all PASS
-- [ ] **Step 2: Build release binary** `make build` → `./weknora-mcp` exists
-- [ ] **Step 3: Create GitHub repo and push**
+- [x] **Step 1: Run full suite** `go vet ./... && go test ./...` → Expected: all PASS
+- [x] **Step 2: Build release binary** `make build` → `./weknora-mcp` exists
+- [x] **Step 3: Create GitHub repo and push**
 
 ```bash
 gh repo create courage-zen/bigdata-mcp-weknora --public --source . --push
@@ -3047,7 +3047,7 @@ gh repo create courage-zen/bigdata-mcp-weknora --public --source . --push
 
 (committer 已配置 GitHub noreply email，见 spec 部署节)
 
-- [ ] **Step 4: Tag v0.1.0 and verify release workflow**
+- [x] **Step 4: Tag v0.1.0 and verify release workflow**
 
 ```bash
 git tag v0.1.0 && git push origin v0.1.0
@@ -3055,7 +3055,7 @@ git tag v0.1.0 && git push origin v0.1.0
 
 Watch the release workflow produce binaries + image; fix any workflow issues and re-tag if needed.
 
-- [ ] **Step 5: Flip GHCR package visibility to public**
+- [x] **Step 5: Flip GHCR package visibility to public**
 
 GHCR creates new packages as **private** by default; `GITHUB_TOKEN` can push but
 cannot set visibility. Until flipped, the README's `docker pull
@@ -3073,7 +3073,7 @@ skip both commands and use the UI: Packages → bigdata-mcp-weknora →
 Package settings → Change visibility → Public. email-mcp's package was
 made public the same way.)
 
-- [ ] **Step 6: Final commit of any verification fixes**
+- [x] **Step 6: Final commit of any verification fixes**
 
 ```bash
 git add -A && git commit -m "chore: v0.1.0 verification fixes" || true
