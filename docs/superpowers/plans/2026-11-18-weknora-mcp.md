@@ -2373,6 +2373,68 @@ func TestKnowledgeIDTraversalRejected(t *testing.T) {
 - [ ] **Step 4: Run** `go test ./... -count=1` → Expected: PASS (8 tools tests; run in package mode — the single-file form doesn't compile)
 - [ ] **Step 5: Commit** `git add tools.go tools_test.go && git commit -m "feat: 10 mcp tools over weknora rest (retrieve+wiki+ingest)"`
 
+### Task 5 quality-review amendments (post-implementation)
+
+The quality review (empirically verified against go-sdk v1.8.0) found the plan's tool schemas were NOT lenient: the SDK resolves the provided InputSchema and validates arguments BEFORE the handler runs, so `required`, `enum` and scalar-type constraints produced bare SDK rejections (no error_code, no multica_context) for exactly the mistakes the handler validations were meant to catch — and explicit nulls on optional params produced a cryptic upstream message (`validating /properties/publish: type: <invalid reflect.Value`). These amendments supersede the schema blocks and addS3Document/s3ErrorPayload code above:
+
+**1. Schema leniency (Critical).** Every schema except `list_knowledge_bases` (already `{"type":"object"}`, no params) transforms:
+- remove all `required` arrays — absent params must reach the handler and return MISSING_PARAM envelopes (add "(required)" to those descriptions instead);
+- every property becomes `{"description":"...","anyOf":[{"type":"<declared>"},{"type":"null"}]}` (arrays: `{"anyOf":[{"type":"array","items":{"type":"string"}},{"type":"null"}]}`) — explicit nulls pass the SDK and the handlers' `present && v != nil` skips them;
+- drop `enum` keywords — valid values move into descriptions; the handler validates `mode` (INVALID_PARAM_VALUE envelope), `sort_by`/`sort_order` pass through to WeKnora (WEKNORA_API_FAILED envelope).
+
+The SDK still enforces declared scalar types (`limit:"10"` → SDK rejection) — the email-mcp-accepted level; INVALID_PARAM_TYPE branches stay as defense in depth. Exemplar (search_knowledge):
+
+```json
+{"type":"object","properties":{
+	"query":{"description":"natural-language question, topic, or exact terms to match (required)","anyOf":[{"type":"string"},{"type":"null"}]},
+	"mode":{"description":"retrieval mode: hybrid (default), semantic, or keyword","anyOf":[{"type":"string"},{"type":"null"}]},
+	"limit":{"description":"max passages, default 10, max 30","anyOf":[{"type":"number"},{"type":"null"}]},
+	"knowledge_ids":{"description":"optional document ids to restrict the search (from list_documents or previous results)","anyOf":[{"type":"array","items":{"type":"string"}},{"type":"null"}]}
+}}
+```
+
+Property lists for the other eight: list_documents (keyword/page/page_size/parse_status/file_type/sort_by/sort_order — sort_by desc "sort field: created_at (default), updated_at, or file_name", sort_order desc "asc or desc (default desc)"); read_document (knowledge_id (required)/page/page_size/chunk_type); wiki_search (query (required)/regex/limit); wiki_read_page (slug (required)); wiki_index (limit); add_document (title (required)/content/url/s3_key/publish); update_document (knowledge_id (required)/content (required)/title/publish); delete_document (knowledge_id (required)).
+
+**2. S3-path upload errors (Important).** addS3Document wraps only the pre-upload phases (store nil / key resolve / Get) in s3ToolError; WeKnora-side upload failures (weknoraError, timeouts) must surface through mapWeKnoraError, not S3_FETCH_FAILED. s3ErrorPayload is deleted; addS3Document drops its unused mc param. handleAddDocument's default branch:
+
+```go
+		default:
+			doc, err = env.addS3Document(ctx, m, title, strings.TrimSpace(s3key), publish)
+			if err != nil {
+				if ste, ok := err.(*s3ToolError); ok {
+					return errPayload(ste.code, ste.msg, mc)
+				}
+				// the s3 phases succeeded; this failure is on the
+				// WeKnora upload side — use the WeKnora vocabulary.
+				return mapWeKnoraError(err, mc)
+			}
+		}
+```
+
+**3. Wiki slug dot-segment guard (Important).** Multi-segment slugs keep "/" structural, but "."/".." segments would be resolved by any normalizing proxy in front of WeKnora and could climb out of the `/wiki/pages/{kb}/` prefix:
+
+```go
+// validateWikiSlug guards the slug of wiki_read_page: slugs are
+// multi-segment identifiers, so "/" is structural — but a "." or ".."
+// segment would be resolved by any normalizing proxy in front of
+// WeKnora and could climb out of the /wiki/pages/{kb}/ prefix to read
+// another knowledge base under this workspace's API key.
+func validateWikiSlug(slug string) error {
+	for _, seg := range strings.Split(slug, "/") {
+		if seg == "." || seg == ".." {
+			return fmt.Errorf("parameter \"slug\" must be a wiki page slug, not a path")
+		}
+	}
+	return nil
+}
+```
+
+Applied in handleWikiReadPage after the empty check, on the trimmed slug.
+
+**4. Minor fixes:** update_document rejects whitespace-only content (TrimSpace, prevents silent blank overwrite); knowledge_id is trimmed at use in read/update/delete (an opaque ID with trailing whitespace is an avoidable 404); callTool drops its unused env param (signature + 10 call sites); test fake records addManualContent (asserted in S3Routing) and addManualPub (publish:false case), dead addManualBody field removed, ReadChunks' query recording renamed lastQuery; go.mod go-sdk marker corrected to direct (surgical go mod edit, not tidy).
+
+**5. New tests:** SDK-level leniency test over a bare mcp.Server + RegisterTools httptest harness in tools_test.go (absent query → MISSING_PARAM envelope; null optionals → success; null query → MISSING_PARAM; bogus mode → INVALID_PARAM_VALUE); S3 upload-failure test (Store.Get succeeds, AddManualDocument returns weknoraError 500 → WEKNORA_API_FAILED, not S3_FETCH_FAILED); wiki slug dot-segment test (../x, a/../b, entity/. rejected, none reach the client); whitespace-content and knowledge-id-trim tests.
+
 ---
 
 ## Task 6: middleware.go + server.go + main.go — HTTP assembly
