@@ -2581,11 +2581,76 @@ S3_USE_PATH_STYLE / S3_KEY_PREFIXES / S3_MAX_FILE_BYTES。
 
 ## multica 接入
 
-（stdio proxy 配置 JSON，同 spec）
+工作区 MCP 库条目（经 multica-stdio-mcp-proxy stdio 接入；一个 weknora-mcp 实例
+服务多个工作区，数据按 workspace 天然隔离）：
+
+```json
+{
+  "mcpServers": {
+    "weknora-mcp": {
+      "command": "multica-stdio-mcp-proxy",
+      "args": [
+        "--url", "http://weknora-mcp-host:8000/mcp",
+        "--token", "<upstream-bearer-key>",
+        "--allow-http"
+      ]
+    }
+  }
+}
+```
 
 ## 工具说明
 
-（10 工具参数表，从 spec 抄）
+工具命名对齐 WeKnora 官方 MCP，便于 agent 认知迁移；差异：参数去掉 KB 选择
+（服务端按 workspace 自动路由），输出统一附 multica_context 回显。
+`grep_chunks`（无 REST 等价）与 `ask`（走 LLM）不提供。
+
+### 只读 7 个（始终注册）
+
+| 工具 | 参数 | 说明 |
+| --- | --- | --- |
+| `list_knowledge_bases` | 无 | 列出本映射 key 可见的知识库 |
+| `search_knowledge` | `query`*、`mode`（hybrid/semantic/keyword，默认 hybrid）、`limit`（默认 10，上限 30）、`knowledge_ids`（可选数组，限定文档） | 语义/关键词/混合检索，返回相关段落 |
+| `list_documents` | `keyword`、`page`、`page_size`（默认 20，上限 100）、`parse_status`、`file_type`、`sort_by`、`sort_order` | 分页列文档 |
+| `read_document` | `knowledge_id`*、`page`、`page_size`（默认 10，上限 100）、`chunk_type`（可选数组，默认 text） | 按阅读顺序读文档分块 |
+| `wiki_search` | `query`*、`regex`（bool，省略自动判断）、`limit`（默认 10，上限 50） | 按标题/别名/内容搜索 wiki 页面 |
+| `wiki_read_page` | `slug`* | 读整页 Markdown 与元数据；出链自动内联摘要（上限 10 个，超出标 out_links_omitted） |
+| `wiki_index` | `limit`（默认 50，上限 200） | wiki 目录：intro + 按类型分组 |
+
+### 写入 3 个（`WEKNORA_ENABLE_INGEST=true` 时注册）
+
+| 工具 | 参数 | 说明 |
+| --- | --- | --- |
+| `add_document` | `title`*、`content`\|`url`\|`s3_key`（互斥，恰好其一）、`publish`（默认 true） | 三源入库，异步提交即返回 document id；s3_key 按对象后缀分流（.md → 文本，其他 → 文件上传） |
+| `update_document` | `knowledge_id`*、`content`*、`title`、`publish` | 替换 Markdown 文档内容/标题 |
+| `delete_document` | `knowledge_id`* | 永久删除文档及索引数据（异步任务） |
+
+### 错误码
+
+| error_code | 场景 |
+| --- | --- |
+| `WORKSPACE_NOT_MAPPED` | 无 workspace header 或不在映射表 |
+| `ACCESS_DENIED` | agent 不在白名单 |
+| `MISSING_PARAM` / `INVALID_PARAM_TYPE` / `INVALID_PARAM_VALUE` | 参数校验 |
+| `WEKNORA_API_FAILED` | WeKnora 返回 4xx/5xx（透传其 message） |
+| `WEKNORA_TIMEOUT` | WeKnora 调用超时（30s） |
+| `S3_UNAVAILABLE` / `S3_INVALID_KEY` / `S3_OBJECT_NOT_FOUND` / `S3_OBJECT_TOO_LARGE` / `S3_FETCH_FAILED` | S3 源 |
+| `S3_FILE_TOO_LARGE_FOR_WEKNORA` | S3 对象超过 WeKnora 50MB 上限 |
+| `INTERNAL` | 兜底 |
+
+## 部署
+
+```bash
+docker run -d -p 8000:8000 \
+  -e WEKNORA_BASE_URL=http://your-weknora-host:28444 \
+  -e WEKNORA_WORKSPACE_MAP="ws-uuid-1:kb-uuid-1" \
+  -e WEKNORA_WORKSPACE_ws-uuid-1_API_KEY=wk-xxx \
+  -e MCP_AUTH_KEY=bearer-key \
+  ghcr.io/courage-zen/bigdata-mcp-weknora:v0.1.0
+```
+
+镜像：GHCR 多架构（amd64/arm64）；Release 附 linux 静态二进制与 air-gapped
+镜像 tar（含 checksums）。
 ```
 
 `.github/workflows/build.yml`:
@@ -2671,13 +2736,21 @@ jobs:
       - name: Smoke test (amd64 only)
         if: matrix.arch == 'amd64'
         run: |
-          WEKNORA_BASE_URL=http://weknora.invalid           WEKNORA_WORKSPACE_MAP=smoke-ws:smoke-kb           WEKNORA_WORKSPACE_smoke-ws_API_KEY=smoke-key           MCP_AUTH_KEY=smoke-key MCP_PORT=8123 ./weknora-mcp > server.log 2>&1 &
+          WEKNORA_BASE_URL=http://weknora.invalid \
+          WEKNORA_WORKSPACE_MAP=smoke-ws:smoke-kb \
+          WEKNORA_WORKSPACE_smoke-ws_API_KEY=smoke-key \
+          MCP_AUTH_KEY=smoke-key MCP_PORT=8123 ./weknora-mcp > server.log 2>&1 &
           server_pid=$!
           for i in $(seq 1 30); do
             curl -s -o /dev/null http://127.0.0.1:8123/health && break
             sleep 1
           done
-          response="$(curl -s -X POST http://127.0.0.1:8123/mcp             -H "Authorization: Bearer smoke-key"             -H "Content-Type: application/json"             -H "Accept: application/json, text/event-stream"             -H "X-Multica-Workspace-Id: smoke-ws"             -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"search_knowledge","arguments":{"query":"smoke"}},"id":2}')"
+          response="$(curl -s -X POST http://127.0.0.1:8123/mcp \
+            -H "Authorization: Bearer smoke-key" \
+            -H "Content-Type: application/json" \
+            -H "Accept: application/json, text/event-stream" \
+            -H "X-Multica-Workspace-Id: smoke-ws" \
+            -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"search_knowledge","arguments":{"query":"smoke"}},"id":2}')"
           echo "${response}" | grep -q "WEKNORA_API_FAILED" || {
             echo "smoke call did not reach the weknora error path"; cat server.log; exit 1;
           }
