@@ -2,7 +2,9 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -48,6 +50,9 @@ func parseWorkspaceMap(raw string) (map[string]string, error) {
 		ws, kb, ok := strings.Cut(pair, ":")
 		ws, kb = strings.TrimSpace(ws), strings.TrimSpace(kb)
 		if !ok || ws == "" || kb == "" {
+			return nil, fmt.Errorf("WEKNORA_WORKSPACE_MAP entry %d (%q) must be workspace_id:kb_id", i+1, pair)
+		}
+		if strings.Contains(ws, ":") || strings.Contains(kb, ":") {
 			return nil, fmt.Errorf("WEKNORA_WORKSPACE_MAP entry %d (%q) must be workspace_id:kb_id", i+1, pair)
 		}
 		if _, dup := out[ws]; dup {
@@ -119,6 +124,7 @@ func LoadConfig() (*Config, error) {
 		}
 	}
 	if len(missingKeys) > 0 {
+		sort.Strings(missingKeys)
 		return nil, fmt.Errorf("per-mapping API keys are required; missing env: %s", strings.Join(missingKeys, ", "))
 	}
 
@@ -163,5 +169,81 @@ type S3Config struct {
 	MaxFileBytes       int64
 }
 
-// loadS3Config is implemented in the S3 task; stub until then.
-func loadS3Config() *S3Config { return nil }
+// loadS3Config resolves the S3 env contract: trio (S3_BUCKET /
+// AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY) incomplete → nil (soft
+// disable); complete → resolved config. Legacy names S3_ACCESS_KEY /
+// S3_SECRET_KEY readable (standard wins).
+func loadS3Config() *S3Config {
+	bucket := strings.TrimSpace(os.Getenv("S3_BUCKET"))
+	accessKeyID := strings.TrimSpace(s3Env("AWS_ACCESS_KEY_ID", "S3_ACCESS_KEY"))
+	secretKey := strings.TrimSpace(s3Env("AWS_SECRET_ACCESS_KEY", "S3_SECRET_KEY"))
+	if bucket == "" || accessKeyID == "" || secretKey == "" {
+		if bucket != "" || accessKeyID != "" || secretKey != "" {
+			var missing []string
+			if bucket == "" {
+				missing = append(missing, "S3_BUCKET")
+			}
+			if accessKeyID == "" {
+				missing = append(missing, "AWS_ACCESS_KEY_ID")
+			}
+			if secretKey == "" {
+				missing = append(missing, "AWS_SECRET_ACCESS_KEY")
+			}
+			log.Printf("config: s3 disabled, missing env: %s (s3_key source returns S3_UNAVAILABLE)", strings.Join(missing, ", "))
+		}
+		return nil
+	}
+	s3 := &S3Config{Bucket: bucket, AccessKeyID: accessKeyID, SecretKey: secretKey}
+	s3.Region = strings.TrimSpace(s3Env("S3_REGION", ""))
+	if s3.Region == "" {
+		s3.Region = strings.TrimSpace(os.Getenv("AWS_REGION"))
+	}
+	if s3.Region == "" {
+		s3.Region = "us-east-1"
+	}
+	if v := strings.TrimSpace(s3Env("AWS_ENDPOINT_URL", "")); v != "" {
+		s3.EndpointURL = v
+	} else if v := strings.TrimSpace(os.Getenv("S3_ENDPOINT")); v != "" {
+		s3.Endpoint = v
+		s3.Secure = parseBoolEnv("S3_SECURE", false)
+	}
+	s3.UsePathStyle, s3.PathStyleExplicit = parsePathStyleEnv(s3Env("S3_USE_PATH_STYLE", ""), s3.EndpointURL != "" || s3.Endpoint != "")
+	s3.AllowedKeyPrefixes = splitCSV(s3Env("S3_KEY_PREFIXES", ""))
+	s3.MaxFileBytes = parseBytesEnv(s3Env("S3_MAX_FILE_BYTES", ""), 100*1024*1024)
+	return s3
+}
+
+// s3Env returns the standard name's value first, then the legacy name.
+func s3Env(std, legacy string) string {
+	if v := os.Getenv(std); v != "" {
+		return v
+	}
+	return os.Getenv(legacy)
+}
+
+func parseBoolEnv(name string, def bool) bool {
+	if v := strings.TrimSpace(os.Getenv(name)); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			return b
+		}
+		log.Printf("config: %s=%q is not a valid bool, using %v", name, v, def)
+	}
+	return def
+}
+
+func parseBytesEnv(raw string, def int64) int64 {
+	if n, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64); err == nil && n > 0 {
+		return n
+	}
+	return def
+}
+
+func parsePathStyleEnv(raw string, hasEndpoint bool) (value, explicit bool) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "1", "true", "yes":
+		return true, true
+	case "0", "false", "no":
+		return false, true
+	}
+	return hasEndpoint, false
+}
