@@ -45,7 +45,7 @@
 ```bash
 cd /Users/zhengyong/code/bigdata-mcp-weknora
 go mod init weknora-mcp
-go get github.com/modelcontextprotocol/go-sdk@v1.8.0
+go get github.com/modelcontextprotocol/go-sdk/mcp@v1.8.0
 go get github.com/minio/minio-go/v7@v7.2.1
 ```
 
