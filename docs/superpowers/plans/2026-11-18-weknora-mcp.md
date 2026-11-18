@@ -2637,9 +2637,9 @@ func TestServer_IngestToolsPresentWhenEnabled(t *testing.T) {
 ```
 
 - [ ] **Step 1: Write failing tests** (`server_test.go`, code above)
-- [ ] **Step 2: Run** `go test ./server_test.go` → Expected: FAIL (NewHandler undefined)
+- [ ] **Step 2: Run** `go test . -count=1` → Expected: FAIL (NewHandler undefined; package mode — the single-file form doesn't compile)
 - [ ] **Step 3: Write middleware.go, server.go, main.go** (code above)
-- [ ] **Step 4: Run** `go test ./...` → Expected: PASS (all)
+- [ ] **Step 4: Run** `go test ./... -count=1` → Expected: PASS (all)
 - [ ] **Step 5: Manual smoke** — `go build -o weknora-mcp . && WEKNORA_BASE_URL=http://weknora.test WEKNORA_WORKSPACE_MAP=ws-1:kb-1 WEKNORA_WORKSPACE_ws-1_API_KEY=wk-a ./weknora-mcp &` then `curl -s localhost:8000/health` → expect `{"status":"ok","workspaces":1,"ingest":false,"s3":"not-configured"}`; kill the process
 - [ ] **Step 6: Commit** `git add middleware.go server.go main.go server_test.go && git commit -m "feat: http assembly (health, mcp streamable, bearer auth)"`
 
