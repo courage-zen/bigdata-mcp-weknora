@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -124,6 +125,9 @@ func envSearchKnowledge(env *ServerEnv, hdr http.Header, args map[string]any) []
 }
 func envWikiReadPage(env *ServerEnv, hdr http.Header, args map[string]any) []byte {
 	return env.handleWikiReadPage(context.Background(), hdr, args)
+}
+func envWikiSearch(env *ServerEnv, hdr http.Header, args map[string]any) []byte {
+	return env.handleWikiSearch(context.Background(), hdr, args)
 }
 func envAddDocument(env *ServerEnv, hdr http.Header, args map[string]any) []byte {
 	return env.handleAddDocument(context.Background(), hdr, args)
@@ -261,6 +265,34 @@ func TestWikiReadPage_OutLinkInliningCap(t *testing.T) {
 	// 1 main read + 10 inlined = 11 WeKnora calls
 	if len(fake.wikiReadSlugs) != 11 {
 		t.Fatalf("wiki calls = %d, want 11", len(fake.wikiReadSlugs))
+	}
+}
+
+func TestWikiSearch_RegexModes(t *testing.T) {
+	env := testEnv(&fakeWeKnoraCaller{})
+
+	// regex omitted + compileable query → forwarded untouched
+	envWikiSearch(env, wsHeaders(), map[string]any{"query": "rag pipeline"})
+	if got := env.WeKnora.(*fakeWeKnoraCaller).wikiSearchQ; got != "rag pipeline" {
+		t.Errorf("auto compileable: q = %q", got)
+	}
+
+	// regex omitted + invalid regex → QuoteMeta fallback (official auto-detect)
+	envWikiSearch(env, wsHeaders(), map[string]any{"query": "(unclosed"})
+	if got := env.WeKnora.(*fakeWeKnoraCaller).wikiSearchQ; got != regexp.QuoteMeta("(unclosed") {
+		t.Errorf("auto invalid: q = %q, want QuoteMeta", got)
+	}
+
+	// regex=false → always literal
+	envWikiSearch(env, wsHeaders(), map[string]any{"query": "a.b", "regex": false})
+	if got := env.WeKnora.(*fakeWeKnoraCaller).wikiSearchQ; got != regexp.QuoteMeta("a.b") {
+		t.Errorf("explicit false: q = %q", got)
+	}
+
+	// regex=true → forwarded untouched even when invalid (WeKnora reports it)
+	envWikiSearch(env, wsHeaders(), map[string]any{"query": "(unclosed", "regex": true})
+	if got := env.WeKnora.(*fakeWeKnoraCaller).wikiSearchQ; got != "(unclosed" {
+		t.Errorf("explicit true: q = %q", got)
 	}
 }
 

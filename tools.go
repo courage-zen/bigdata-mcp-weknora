@@ -238,7 +238,7 @@ func addWikiTools(server *mcp.Server, env *ServerEnv) {
 	"type":"object",
 	"properties":{
 		"query":{"description":"search terms or a regular expression (case-insensitive POSIX) (required)","anyOf":[{"type":"string"},{"type":"null"}]},
-		"regex":{"description":"false forces literal match; true requires valid regex; omit for auto","anyOf":[{"type":"boolean"},{"type":"null"}]},
+		"regex":{"description":"false forces literal match; true treats the query as regex; omit to auto-detect (invalid regex falls back to literal)","anyOf":[{"type":"boolean"},{"type":"null"}]},
 		"limit":{"description":"max pages, default 10, max 50","anyOf":[{"type":"number"},{"type":"null"}]}
 	}
 }`),
@@ -265,7 +265,7 @@ func addIngestTools(server *mcp.Server, env *ServerEnv) {
 		InputSchema: json.RawMessage(`{
 	"type":"object",
 	"properties":{
-		"title":{"description":"document title (required; for s3_key defaults to the object's base name without .md)","anyOf":[{"type":"string"},{"type":"null"}]},
+		"title":{"description":"document title (required)","anyOf":[{"type":"string"},{"type":"null"}]},
 		"content":{"description":"Markdown content; required unless url or s3_key is given","anyOf":[{"type":"string"},{"type":"null"}]},
 		"url":{"description":"web page or file URL to import; required unless content or s3_key is given","anyOf":[{"type":"string"},{"type":"null"}]},
 		"s3_key":{"description":"object key (or full object-store URL) in the configured bucket; required unless content or url is given","anyOf":[{"type":"string"},{"type":"null"}]},
@@ -495,6 +495,10 @@ func (env *ServerEnv) handleWikiSearch(ctx context.Context, hdr http.Header, arg
 		if !b {
 			query = regexp.QuoteMeta(query)
 		}
+	} else if _, err := regexp.Compile("(?i)" + query); err != nil {
+		// Official auto-detect semantics (WeKnora wikiSearchPattern):
+		// omitted regex with a query that does not compile → literal search.
+		query = regexp.QuoteMeta(query)
 	}
 	pages, err := env.WeKnora.WikiSearch(ctx, m, query, limit)
 	if err != nil {
