@@ -1060,7 +1060,63 @@ func parsePathStyleEnv(raw string, hasEndpoint bool) (value, explicit bool) {
 }
 ```
 
-`S3Config` struct definition goes in s3.go (copy from email-mcp config.go lines 29-49: Bucket, Region, AccessKeyID, SecretKey, EndpointURL, Endpoint, Secure, UsePathStyle, PathStyleExplicit, AllowedKeyPrefixes, MaxFileBytes).
+**`S3Config` already lives in config.go** (landed in Task 2) — do NOT re-declare it in s3.go. Task 4 only replaces the `loadS3Config` nil-stub in config.go with the loader above and adds the `"log"` import to config.go's import block (the loader's log.Printf calls need it).
+
+While in config.go/config_test.go, fold in three hardenings (review findings from Task 2, plan-inherited gaps):
+
+1. `parseWorkspaceMap`: reject pairs with more than one colon — after `strings.Cut`, error if either side still contains `:`:
+
+```go
+		if strings.Contains(ws, ":") || strings.Contains(kb, ":") {
+			return nil, fmt.Errorf("WEKNORA_WORKSPACE_MAP entry %d (%q) must be workspace_id:kb_id", i+1, pair)
+		}
+```
+
+(insert immediately after the `if !ok || ws == "" || kb == ""` check)
+
+2. `sort.Strings(missingKeys)` before the join in `LoadConfig` (reproducible error messages across map iteration order); add `"sort"` to imports.
+
+3. Three new tests in config_test.go:
+
+```go
+func TestLoadConfig_MultiColonRejected(t *testing.T) {
+	baseEnv(t)
+	t.Setenv("WEKNORA_WORKSPACE_MAP", "ws-1:kb-1:typo")
+	if _, err := LoadConfig(); err == nil || !strings.Contains(err.Error(), "entry 1") {
+		t.Fatalf("want entry error, got %v", err)
+	}
+}
+
+func TestLoadConfig_InvalidPort(t *testing.T) {
+	baseEnv(t)
+	t.Setenv("WEKNORA_WORKSPACE_MAP", "ws-1:kb-1")
+	t.Setenv("WEKNORA_WORKSPACE_ws-1_API_KEY", "wk-a")
+	t.Setenv("MCP_PORT", "99999")
+	if _, err := LoadConfig(); err == nil || !strings.Contains(err.Error(), "MCP_PORT") {
+		t.Fatalf("want port error, got %v", err)
+	}
+}
+
+func TestLoadConfig_AllowlistEnv(t *testing.T) {
+	baseEnv(t)
+	t.Setenv("WEKNORA_WORKSPACE_MAP", "ws-1:kb-1")
+	t.Setenv("WEKNORA_WORKSPACE_ws-1_API_KEY", "wk-a")
+	t.Setenv("WEKNORA_WORKSPACE_ws-1_ALLOWED_AGENT_IDS", "ag-1, ag-2")
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, _ := cfg.MappingFor("ws-1")
+	if len(m.AllowedAgentIDs) != 2 || m.AllowedAgentIDs[0] != "ag-1" || m.AllowedAgentIDs[1] != "ag-2" {
+		t.Fatalf("allowlist: %v", m.AllowedAgentIDs)
+	}
+	if m.AgentAllowed("ag-1-x") || m.AgentAllowed("ag-9") {
+		t.Error("allowlist gating wrong")
+	}
+}
+```
+
+Also harden the negative tests against ambient env: in `TestLoadConfig_MissingBaseURL` add `t.Setenv("WEKNORA_BASE_URL", "")` at the top, and in `TestLoadConfig_EmptyMap` / `TestLoadConfig_MalformedEntry` / `TestLoadConfig_DuplicateWorkspaceAndKB` add `t.Setenv("WEKNORA_WORKSPACE_MAP", ...)` is already there — only `TestLoadConfig_MissingBaseURL` needs the explicit empty (it must be immune to an exported WEKNORA_WORKSPACE_MAP in the shell).
 
 Extend `config_test.go`:
 
