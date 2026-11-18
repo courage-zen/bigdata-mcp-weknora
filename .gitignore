@@ -1,0 +1,12 @@
+# Build artifacts
+weknora-mcp
+*.tar.gz
+
+# Local env / config
+.env
+*.local.yaml
+
+# Go
+*.test
+*.out
+coverage.*
