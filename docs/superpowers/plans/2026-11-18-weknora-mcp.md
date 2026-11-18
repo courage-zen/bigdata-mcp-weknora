@@ -3062,12 +3062,16 @@ cannot set visibility. Until flipped, the README's `docker pull
 ghcr.io/courage-zen/bigdata-mcp-weknora:v0.1.0` returns 401 for users.
 
 ```bash
+gh auth refresh -s write:packages   # one-time scope grant (interactive)
 gh api -X PATCH /user/packages/container/bigdata-mcp-weknora \
   -f visibility=public
 ```
 
-(Alternatively in the UI: Packages → bigdata-mcp-weknora → Package settings →
-Change visibility → Public. email-mcp's package was made public the same way.)
+(The refresh is needed because the default `gh` token scopes — repo, gist —
+do not include `write:packages`; without it the PATCH 404s. Alternatively
+skip both commands and use the UI: Packages → bigdata-mcp-weknora →
+Package settings → Change visibility → Public. email-mcp's package was
+made public the same way.)
 
 - [ ] **Step 6: Final commit of any verification fixes**
 
