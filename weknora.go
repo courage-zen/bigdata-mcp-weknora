@@ -283,8 +283,10 @@ func (w *weknoraClient) AddFileDocument(ctx context.Context, m *WorkspaceMapping
 	var buf bytes.Buffer
 	mw := multipart.NewWriter(&buf)
 	hdr := textproto.MIMEHeader{}
-	hdr.Set("Content-Disposition",
-		fmt.Sprintf(`form-data; name="file"; filename="%s"`, escapeQuotes(filename)))
+	// stdlib's escaping (backslash, quote, and CR/LF as %0D/%0A) — a
+	// hand-rolled version that skips CR/LF would allow header-splitting
+	// from a hostile filename.
+	hdr.Set("Content-Disposition", multipart.FileContentDisposition("file", filename))
 	if contentType != "" {
 		hdr.Set("Content-Type", contentType)
 	} else {
@@ -365,10 +367,4 @@ func pathSegments(s string) string {
 		parts[i] = url.PathEscape(p)
 	}
 	return strings.Join(parts, "/")
-}
-
-// escapeQuotes makes a value safe inside a quoted Content-Disposition
-// parameter (same escaping as Go's mime/multipart CreateFormFile).
-func escapeQuotes(s string) string {
-	return strings.NewReplacer("\\", "\\\\", `"`, `\"`).Replace(s)
 }
