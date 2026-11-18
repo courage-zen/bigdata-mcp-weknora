@@ -112,12 +112,18 @@ func TestWeKnoraClient_MultipartFileUpload(t *testing.T) {
 		if r.FormValue("channel") != "mcp" {
 			t.Errorf("channel = %q", r.FormValue("channel"))
 		}
-		fh, _, err := r.FormFile("file")
+		fh, hdr, err := r.FormFile("file")
 		if err != nil {
 			t.Errorf("form file: %v", err)
 			return
 		}
 		defer fh.Close()
+		if hdr.Filename != "report.csv" {
+			t.Errorf("file part filename = %q", hdr.Filename)
+		}
+		if r.FormValue("fileName") != "report.csv" {
+			t.Errorf("fileName = %q", r.FormValue("fileName"))
+		}
 		b, _ := io.ReadAll(fh)
 		if string(b) != "csv,data\n1,2\n" {
 			t.Errorf("file content: %q", string(b))
