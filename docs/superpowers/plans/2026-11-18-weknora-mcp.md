@@ -1266,7 +1266,13 @@ func mapWeKnoraError(err error, mc map[string]string) []byte {
 	if strings.Contains(err.Error(), "context deadline exceeded") {
 		return errPayload(errCodeWeKnoraTimeout, "weknora api call timed out (30s)", mc)
 	}
-	return errPayload(errCodeInternal, err.Error(), mc)
+	// Transport failures (DNS, connection refused): the call to the
+	// weknora API failed without an HTTP status — same caller-facing
+	// meaning as an API error, and the error text (e.g. "weknora request
+	// failed: dial tcp: lookup weknora.invalid: no such host") already
+	// says what broke. The Task 7 release smoke depends on this mapping
+	// (it greps for WEKNORA_API_FAILED against an unresolvable base URL).
+	return errPayload(errCodeWeKnoraFailed, err.Error(), mc)
 }
 
 // validateKnowledgeID guards the path-bound knowledge_id parameter:
@@ -2735,7 +2741,7 @@ S3_USE_PATH_STYLE / S3_KEY_PREFIXES / S3_MAX_FILE_BYTES。
 | `WEKNORA_TIMEOUT` | WeKnora 调用超时（30s） |
 | `S3_UNAVAILABLE` / `S3_INVALID_KEY` / `S3_OBJECT_NOT_FOUND` / `S3_OBJECT_TOO_LARGE` / `S3_FETCH_FAILED` | S3 源 |
 | `S3_FILE_TOO_LARGE_FOR_WEKNORA` | S3 对象超过 WeKnora 50MB 上限 |
-| `INTERNAL` | 兜底 |
+| `INTERNAL` | 兜底（当前仅 marshal 失败；传输错误归入 WEKNORA_API_FAILED） |
 
 ## 部署
 
