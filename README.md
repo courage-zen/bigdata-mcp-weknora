@@ -94,7 +94,7 @@ S3_USE_PATH_STYLE / S3_KEY_PREFIXES / S3_MAX_FILE_BYTES。
 
 ```bash
 docker run -d -p 8000:8000 \
-  -e WEKNORA_BASE_URL=http://your-weknora-host:28444 \
+  -e WEKNORA_BASE_URL=http://your-weknora-host:port \
   -e WEKNORA_WORKSPACE_MAP="ws-uuid-1:kb-uuid-1" \
   -e WEKNORA_WORKSPACE_ws-uuid-1_API_KEY=wk-xxx \
   -e MCP_AUTH_KEY=bearer-key \
