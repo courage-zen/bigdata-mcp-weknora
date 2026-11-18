@@ -23,6 +23,8 @@ type fakeWeKnoraCaller struct {
 	lastQuery        url.Values
 	readChunksID     string
 	wikiSearchQ      string
+	wikiSearchLimit  int
+	wikiIndexLimit   int
 	wikiReadSlugs    []string
 	addManualTitle   string
 	addManualContent string
@@ -32,6 +34,8 @@ type fakeWeKnoraCaller struct {
 	addFileName      string
 	addFileContent   []byte
 	updateID         string
+	updateTitle      string
+	updatePub        bool
 	deleteID         string
 
 	searchResults  []json.RawMessage
@@ -55,7 +59,7 @@ func (f *fakeWeKnoraCaller) ReadChunks(ctx context.Context, m *WorkspaceMapping,
 	return nil, 0, nil
 }
 func (f *fakeWeKnoraCaller) WikiSearch(ctx context.Context, m *WorkspaceMapping, q string, limit int) ([]json.RawMessage, error) {
-	f.wikiSearchQ = q
+	f.wikiSearchQ, f.wikiSearchLimit = q, limit
 	return nil, nil
 }
 func (f *fakeWeKnoraCaller) WikiReadPage(ctx context.Context, m *WorkspaceMapping, slug string) (map[string]any, error) {
@@ -66,6 +70,7 @@ func (f *fakeWeKnoraCaller) WikiReadPage(ctx context.Context, m *WorkspaceMappin
 	return map[string]any{"slug": slug, "title": slug, "summary": "s-" + slug}, nil
 }
 func (f *fakeWeKnoraCaller) WikiIndex(ctx context.Context, m *WorkspaceMapping, limit int) (map[string]any, error) {
+	f.wikiIndexLimit = limit
 	return map[string]any{"intro": "i"}, nil
 }
 func (f *fakeWeKnoraCaller) AddManualDocument(ctx context.Context, m *WorkspaceMapping, title, content string, publish bool) (json.RawMessage, error) {
@@ -84,7 +89,7 @@ func (f *fakeWeKnoraCaller) AddFileDocument(ctx context.Context, m *WorkspaceMap
 	return json.RawMessage(`{"id":"k-file"}`), nil
 }
 func (f *fakeWeKnoraCaller) UpdateDocument(ctx context.Context, m *WorkspaceMapping, id, content, title string, publish bool) (json.RawMessage, error) {
-	f.updateID = id
+	f.updateID, f.updateTitle, f.updatePub = id, title, publish
 	return json.RawMessage(`{"id":"k-upd"}`), nil
 }
 func (f *fakeWeKnoraCaller) DeleteDocument(ctx context.Context, m *WorkspaceMapping, id string) (map[string]any, error) {
@@ -129,6 +134,12 @@ func envWikiReadPage(env *ServerEnv, hdr http.Header, args map[string]any) []byt
 func envWikiSearch(env *ServerEnv, hdr http.Header, args map[string]any) []byte {
 	return env.handleWikiSearch(context.Background(), hdr, args)
 }
+func envWikiIndex(env *ServerEnv, hdr http.Header, args map[string]any) []byte {
+	return env.handleWikiIndex(context.Background(), hdr, args)
+}
+func envDeleteDocument(env *ServerEnv, hdr http.Header, args map[string]any) []byte {
+	return env.handleDeleteDocument(context.Background(), hdr, args)
+}
 func envAddDocument(env *ServerEnv, hdr http.Header, args map[string]any) []byte {
 	return env.handleAddDocument(context.Background(), hdr, args)
 }
@@ -140,9 +151,6 @@ func envReadDocument(env *ServerEnv, hdr http.Header, args map[string]any) []byt
 }
 func envUpdateDocument(env *ServerEnv, hdr http.Header, args map[string]any) []byte {
 	return env.handleUpdateDocument(context.Background(), hdr, args)
-}
-func envDeleteDocument(env *ServerEnv, hdr http.Header, args map[string]any) []byte {
-	return env.handleDeleteDocument(context.Background(), hdr, args)
 }
 
 func TestResolveMapping_Gates(t *testing.T) {
@@ -498,6 +506,62 @@ func TestUpdateDocument_WhitespaceContentRejected(t *testing.T) {
 	}
 	if fake.updateID != "" {
 		t.Fatalf("whitespace content reached the client: %q", fake.updateID)
+	}
+}
+
+func TestUpdateDocument_HappyPath(t *testing.T) {
+	fake := &fakeWeKnoraCaller{updateTitle: "T2", updatePub: false}
+	env := testEnv(fake)
+	payload := envUpdateDocument(env, wsHeaders(), map[string]any{
+		"knowledge_id": "k-1", "content": "# new", "title": "T2", "publish": false,
+	})
+	if r := decodePayload(t, payload); !r.Success {
+		t.Fatalf("payload: %s", payload)
+	}
+	if fake.updateID != "k-1" {
+		t.Errorf("update id = %q", fake.updateID)
+	}
+	if fake.updateTitle != "T2" {
+		t.Errorf("update title = %q", fake.updateTitle)
+	}
+	if fake.updatePub {
+		t.Errorf("update publish = true, want false passthrough")
+	}
+}
+
+func TestDeleteDocument_HappyPath(t *testing.T) {
+	fake := &fakeWeKnoraCaller{}
+	env := testEnv(fake)
+	payload := envDeleteDocument(env, wsHeaders(), map[string]any{"knowledge_id": "k-2"})
+	if r := decodePayload(t, payload); !r.Success {
+		t.Fatalf("payload: %s", payload)
+	}
+	if fake.deleteID != "k-2" {
+		t.Fatalf("delete id = %q, want k-2", fake.deleteID)
+	}
+}
+
+func TestWikiSearchAndIndex_HappyPath(t *testing.T) {
+	fake := &fakeWeKnoraCaller{}
+	env := testEnv(fake)
+
+	payload := envWikiSearch(env, wsHeaders(), map[string]any{"query": "hello", "limit": 25.0})
+	if r := decodePayload(t, payload); !r.Success {
+		t.Fatalf("search payload: %s", payload)
+	}
+	if fake.wikiSearchQ != "hello" {
+		t.Errorf("search q = %q", fake.wikiSearchQ)
+	}
+	if fake.wikiSearchLimit != 25 {
+		t.Errorf("search limit = %d, want 25", fake.wikiSearchLimit)
+	}
+
+	payload = envWikiIndex(env, wsHeaders(), map[string]any{"limit": 77.0})
+	if r := decodePayload(t, payload); !r.Success {
+		t.Fatalf("index payload: %s", payload)
+	}
+	if fake.wikiIndexLimit != 77 {
+		t.Errorf("index limit = %d, want 77", fake.wikiIndexLimit)
 	}
 }
 
