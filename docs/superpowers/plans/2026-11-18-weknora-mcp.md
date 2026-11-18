@@ -1279,9 +1279,11 @@ func mapWeKnoraError(err error, mc map[string]string) []byte {
 // WeKnora knowledge IDs are opaque server-generated tokens, never
 // multi-segment (only wiki slugs are, and they go through WikiReadPage),
 // so / or .. in an ID is an attempt to reach another endpoint under the
-// workspace API key.
+// workspace API key. "?" and "#" are refused too: the ID is interpolated
+// into a request path before the query string, so a crafted ? could
+// smuggle extra query parameters (k1?admin=1) into the call.
 func validateKnowledgeID(id string) error {
-	if strings.Contains(id, "/") || strings.Contains(id, "..") {
+	if strings.Contains(id, "/") || strings.Contains(id, "..") || strings.Contains(id, "?") || strings.Contains(id, "#") {
 		return fmt.Errorf("parameter \"knowledge_id\" must be a document id, not a path")
 	}
 	return nil
@@ -2350,7 +2352,7 @@ func TestKnowledgeIDTraversalRejected(t *testing.T) {
 		if r := decodePayload(t, payload); r.ErrorCode != "INVALID_PARAM_VALUE" {
 			t.Fatalf("id %q: code = %q, want INVALID_PARAM_VALUE", id, r.ErrorCode)
 		}
-		if fake.readChunksID != "k-9" { // unchanged from the previous test
+		if fake.readChunksID != "" { // rejected ids must not reach the client
 			t.Fatalf("id %q reached the client", id)
 		}
 	}
