@@ -8,6 +8,30 @@ import (
 func baseEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv("WEKNORA_BASE_URL", "http://weknora.test")
+	unsetS3Env(t)
+	// Immune to an exported MCP_PORT in the developer shell: this test
+	// asserts the default.
+	t.Setenv("MCP_PORT", "")
+}
+
+// unsetS3Env pins every S3-related variable to empty so ambient
+// developer/deployment env can't leak into a test. Empty string is
+// equivalent to unset for every consumer in config.go (s3Env's fallback and
+// the `!= ""` / TrimSpace chains all treat "" as unset).
+func unsetS3Env(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{
+		"S3_BUCKET",
+		"AWS_ACCESS_KEY_ID", "S3_ACCESS_KEY",
+		"AWS_SECRET_ACCESS_KEY", "S3_SECRET_KEY",
+		"AWS_ENDPOINT_URL", "S3_ENDPOINT", "S3_SECURE",
+		"S3_REGION", "AWS_REGION",
+		"S3_USE_PATH_STYLE",
+		"S3_KEY_PREFIXES",
+		"S3_MAX_FILE_BYTES",
+	} {
+		t.Setenv(name, "")
+	}
 }
 
 func TestLoadConfig_MinimalValid(t *testing.T) {
@@ -163,10 +187,8 @@ func TestLoadConfig_AllowlistEnv(t *testing.T) {
 }
 
 func TestLoadConfig_S3TrioIncomplete(t *testing.T) {
-	// Pin the AWS creds empty: a developer shell may export them, and an
-	// empty value reads as unset for the trio's presence checks.
-	t.Setenv("AWS_ACCESS_KEY_ID", "")
-	t.Setenv("AWS_SECRET_ACCESS_KEY", "")
+	// baseEnv pins the whole S3 env empty (incl. legacy S3_ACCESS_KEY /
+	// S3_SECRET_KEY), so only S3_BUCKET below completes part of the trio.
 	baseEnv(t)
 	t.Setenv("WEKNORA_WORKSPACE_MAP", "ws-1:kb-1")
 	t.Setenv("WEKNORA_WORKSPACE_ws-1_API_KEY", "wk-a")
