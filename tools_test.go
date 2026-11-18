@@ -4,28 +4,34 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // fakeWeKnoraCaller records calls and returns canned responses.
 type fakeWeKnoraCaller struct {
-	lastKBID       string
-	lastAPIKey     string
-	searchBody     map[string]any
-	listDocsQuery  url.Values
-	readChunksID   string
-	wikiSearchQ    string
-	wikiReadSlugs  []string
-	addManualBody  map[string]any // recorded via title/content/publish below
-	addManualTitle string
-	addManualPub   bool
-	addURLURL      string
-	addFileName    string
-	addFileContent []byte
-	updateID       string
-	deleteID       string
+	lastKBID         string
+	lastAPIKey       string
+	searchBody       map[string]any
+	lastQuery        url.Values
+	readChunksID     string
+	wikiSearchQ      string
+	wikiReadSlugs    []string
+	addManualTitle   string
+	addManualContent string
+	addManualPub     bool
+	addManualErr     error
+	addURLURL        string
+	addFileName      string
+	addFileContent   []byte
+	updateID         string
+	deleteID         string
 
 	searchResults  []json.RawMessage
 	wikiPageBySlug map[string]map[string]any
@@ -40,11 +46,11 @@ func (f *fakeWeKnoraCaller) SearchKnowledge(ctx context.Context, m *WorkspaceMap
 	return f.searchResults, nil
 }
 func (f *fakeWeKnoraCaller) ListDocuments(ctx context.Context, m *WorkspaceMapping, query url.Values) ([]json.RawMessage, int, error) {
-	f.listDocsQuery = query
+	f.lastQuery = query
 	return nil, 0, nil
 }
 func (f *fakeWeKnoraCaller) ReadChunks(ctx context.Context, m *WorkspaceMapping, id string, query url.Values) ([]json.RawMessage, int, error) {
-	f.readChunksID, f.listDocsQuery = id, query
+	f.readChunksID, f.lastQuery = id, query
 	return nil, 0, nil
 }
 func (f *fakeWeKnoraCaller) WikiSearch(ctx context.Context, m *WorkspaceMapping, q string, limit int) ([]json.RawMessage, error) {
@@ -62,7 +68,10 @@ func (f *fakeWeKnoraCaller) WikiIndex(ctx context.Context, m *WorkspaceMapping, 
 	return map[string]any{"intro": "i"}, nil
 }
 func (f *fakeWeKnoraCaller) AddManualDocument(ctx context.Context, m *WorkspaceMapping, title, content string, publish bool) (json.RawMessage, error) {
-	f.addManualTitle, f.addManualPub = title, publish
+	f.addManualTitle, f.addManualContent, f.addManualPub = title, content, publish
+	if f.addManualErr != nil {
+		return nil, f.addManualErr
+	}
 	return json.RawMessage(`{"id":"k-new"}`), nil
 }
 func (f *fakeWeKnoraCaller) AddURLDocument(ctx context.Context, m *WorkspaceMapping, u, title string) (json.RawMessage, error) {
@@ -310,9 +319,22 @@ func TestAddDocument_S3Routing(t *testing.T) {
 	if fake.addManualTitle != "T" {
 		t.Errorf("manual title = %q", fake.addManualTitle)
 	}
+	if fake.addManualContent != "# hi" {
+		t.Errorf("manual content = %q, want the fetched S3 object", fake.addManualContent)
+	}
 	store := env.Store.(*fakeObjectStore)
 	if store.gotKey != "docs/a.md" || store.gotLimit != weknoraMaxFileBytes {
 		t.Errorf("store.Get key=%q limit=%d", store.gotKey, store.gotLimit)
+	}
+
+	// .md with publish:false keeps the document as draft
+	env.Store = &fakeObjectStore{content: []byte("# draft")}
+	payload = envAddDocument(env, wsHeaders(), map[string]any{"title": "T", "s3_key": "docs/d.md", "publish": false})
+	if r := decodePayload(t, payload); !r.Success {
+		t.Fatalf("payload: %s", payload)
+	}
+	if fake.addManualPub != false {
+		t.Errorf("publish = %v, want false", fake.addManualPub)
 	}
 
 	// .csv object → multipart file endpoint
@@ -356,9 +378,9 @@ func TestListDocuments_ParamPassThrough(t *testing.T) {
 	if r := decodePayload(t, payload); !r.Success {
 		t.Fatalf("payload: %s", payload)
 	}
-	if fake.listDocsQuery.Get("keyword") != "report" || fake.listDocsQuery.Get("page") != "2" ||
-		fake.listDocsQuery.Get("page_size") != "50" || fake.listDocsQuery.Get("parse_status") != "completed" {
-		t.Fatalf("query: %v", fake.listDocsQuery)
+	if fake.lastQuery.Get("keyword") != "report" || fake.lastQuery.Get("page") != "2" ||
+		fake.lastQuery.Get("page_size") != "50" || fake.lastQuery.Get("parse_status") != "completed" {
+		t.Fatalf("query: %v", fake.lastQuery)
 	}
 }
 
@@ -374,7 +396,7 @@ func TestReadDocument_ChunkTypes(t *testing.T) {
 	if fake.readChunksID != "k-9" {
 		t.Fatalf("id = %q", fake.readChunksID)
 	}
-	types := fake.listDocsQuery["chunk_type"]
+	types := fake.lastQuery["chunk_type"]
 	if len(types) != 2 || types[0] != "text" || types[1] != "table_summary" {
 		t.Fatalf("chunk types: %v", types)
 	}
@@ -400,5 +422,111 @@ func TestKnowledgeIDTraversalRejected(t *testing.T) {
 	payload = envDeleteDocument(env, wsHeaders(), map[string]any{"knowledge_id": "a/b"})
 	if r := decodePayload(t, payload); r.ErrorCode != "INVALID_PARAM_VALUE" {
 		t.Fatalf("delete: code = %q", r.ErrorCode)
+	}
+}
+
+func TestAddDocument_S3UploadFailureIsWeKnoraError(t *testing.T) {
+	// Store.Get succeeds, the WeKnora manual upload fails with HTTP 500:
+	// must surface as WEKNORA_API_FAILED (the s3 phases are fine), not
+	// S3_FETCH_FAILED.
+	fake := &fakeWeKnoraCaller{addManualErr: &weknoraError{Status: 500, Message: "boom"}}
+	env := testEnv(fake)
+	env.Store = &fakeObjectStore{content: []byte("# hi")}
+	payload := envAddDocument(env, wsHeaders(), map[string]any{"title": "T", "s3_key": "docs/a.md"})
+	if r := decodePayload(t, payload); r.ErrorCode != "WEKNORA_API_FAILED" {
+		t.Fatalf("code = %q, want WEKNORA_API_FAILED", r.ErrorCode)
+	}
+}
+
+func TestWikiSlug_DotSegmentsRejected(t *testing.T) {
+	fake := &fakeWeKnoraCaller{}
+	env := testEnv(fake)
+	for _, slug := range []string{"../x", "a/../b", "entity/.", "./entity/x"} {
+		payload := envWikiReadPage(env, wsHeaders(), map[string]any{"slug": slug})
+		if r := decodePayload(t, payload); r.ErrorCode != "INVALID_PARAM_VALUE" {
+			t.Fatalf("slug %q: code = %q, want INVALID_PARAM_VALUE", slug, r.ErrorCode)
+		}
+	}
+	if len(fake.wikiReadSlugs) != 0 {
+		t.Fatalf("rejected slugs reached the client: %v", fake.wikiReadSlugs)
+	}
+	// structural slashes remain valid
+	payload := envWikiReadPage(env, wsHeaders(), map[string]any{"slug": "entity/rag"})
+	if r := decodePayload(t, payload); !r.Success {
+		t.Fatalf("multi-segment slug must pass: %s", payload)
+	}
+}
+
+func TestUpdateDocument_WhitespaceContentRejected(t *testing.T) {
+	fake := &fakeWeKnoraCaller{}
+	env := testEnv(fake)
+	payload := envUpdateDocument(env, wsHeaders(), map[string]any{"knowledge_id": "k-1", "content": "   "})
+	if r := decodePayload(t, payload); r.ErrorCode != "MISSING_PARAM" {
+		t.Fatalf("code = %q, want MISSING_PARAM", r.ErrorCode)
+	}
+	if fake.updateID != "" {
+		t.Fatalf("whitespace content reached the client: %q", fake.updateID)
+	}
+}
+
+func TestReadDocument_TrimsKnowledgeID(t *testing.T) {
+	fake := &fakeWeKnoraCaller{}
+	env := testEnv(fake)
+	payload := envReadDocument(env, wsHeaders(), map[string]any{"knowledge_id": " k-9 \n"})
+	if r := decodePayload(t, payload); !r.Success {
+		t.Fatalf("payload: %s", payload)
+	}
+	if fake.readChunksID != "k-9" {
+		t.Fatalf("id = %q, want trimmed k-9", fake.readChunksID)
+	}
+}
+
+func TestSchemaLeniency_SDKValidationLetsHandlerErrorsThrough(t *testing.T) {
+	fake := &fakeWeKnoraCaller{}
+	env := testEnv(fake)
+	server := mcp.NewServer(&mcp.Implementation{Name: "test", Version: "v0"}, nil)
+	RegisterTools(server, env)
+	ts := httptest.NewServer(mcp.NewStreamableHTTPHandler(
+		func(r *http.Request) *mcp.Server { return server },
+		&mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true}))
+	t.Cleanup(ts.Close)
+
+	call := func(body string) string {
+		req, err := http.NewRequest("POST", ts.URL+"/mcp", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json, text/event-stream")
+		req.Header.Set("X-Multica-Workspace-Id", "ws-1")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return string(b)
+	}
+
+	// absent required param → handler MISSING_PARAM envelope, not an SDK
+	// schema rejection (no error_code would appear)
+	body := call(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_knowledge","arguments":{}}}`)
+	if !strings.Contains(body, "MISSING_PARAM") {
+		t.Fatalf("absent query: %s", body)
+	}
+	// explicit nulls on optional params pass through to the handler
+	body = call(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_knowledge","arguments":{"query":"q","mode":null,"limit":null}}}`)
+	if !strings.Contains(body, `"success":true`) {
+		t.Fatalf("null optionals: %s", body)
+	}
+	// explicit null on a required-in-spirit param → handler envelope
+	body = call(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_knowledge","arguments":{"query":null}}}`)
+	if !strings.Contains(body, "MISSING_PARAM") {
+		t.Fatalf("null query: %s", body)
+	}
+	// bogus enum value → handler INVALID_PARAM_VALUE envelope
+	body = call(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_knowledge","arguments":{"query":"q","mode":"bogus"}}}`)
+	if !strings.Contains(body, "INVALID_PARAM_VALUE") {
+		t.Fatalf("bogus mode: %s", body)
 	}
 }

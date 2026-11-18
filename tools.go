@@ -116,6 +116,20 @@ func validateKnowledgeID(id string) error {
 	return nil
 }
 
+// validateWikiSlug guards the slug of wiki_read_page: slugs are
+// multi-segment identifiers, so "/" is structural — but a "." or ".."
+// segment would be resolved by any normalizing proxy in front of
+// WeKnora and could climb out of the /wiki/pages/{kb}/ prefix to read
+// another knowledge base under this workspace's API key.
+func validateWikiSlug(slug string) error {
+	for _, seg := range strings.Split(slug, "/") {
+		if seg == "." || seg == ".." {
+			return fmt.Errorf("parameter \"slug\" must be a wiki page slug, not a path")
+		}
+	}
+	return nil
+}
+
 // RegisterTools registers all tools on the server. Write tools register
 // only when ingest is enabled (deployment-level switch).
 func RegisterTools(server *mcp.Server, env *ServerEnv) {
@@ -128,7 +142,7 @@ func RegisterTools(server *mcp.Server, env *ServerEnv) {
 
 // callTool wraps the email-mcp AddTool pattern: parse args map, run fn,
 // double-surface the payload (structuredContent + TextContent).
-func callTool(server *mcp.Server, env *ServerEnv, tool *mcp.Tool, fn func(ctx context.Context, hdr http.Header, args map[string]any) []byte) {
+func callTool(server *mcp.Server, tool *mcp.Tool, fn func(ctx context.Context, hdr http.Header, args map[string]any) []byte) {
 	mcp.AddTool(server, tool, func(ctx context.Context, req *mcp.CallToolRequest, in any) (*mcp.CallToolResult, any, error) {
 		var hdr map[string][]string
 		if req.Extra != nil && req.Extra.Header != nil {
@@ -165,122 +179,117 @@ func jsonPayloadSuccess(payload []byte) bool {
 
 // addRetrieveTools registers the four read-only knowledge-base tools.
 func addRetrieveTools(server *mcp.Server, env *ServerEnv) {
-	callTool(server, env, &mcp.Tool{
+	callTool(server, &mcp.Tool{
 		Name:        "list_knowledge_bases",
 		Description: "List the knowledge bases visible to this workspace's weknora API key, with id, name and description. Other tools operate on the knowledge base this multica workspace is mapped to.",
 		InputSchema: json.RawMessage(`{"type":"object"}`),
 	}, env.handleListKnowledgeBases)
-	callTool(server, env, &mcp.Tool{
+	callTool(server, &mcp.Tool{
 		Name: "search_knowledge",
 		Description: "Search this workspace's weknora knowledge base and return the most relevant passages with document ids and titles. " +
 			"mode hybrid (default) combines semantic and keyword retrieval; semantic ranks by meaning; keyword matches exact terms, identifiers or codes.",
 		InputSchema: json.RawMessage(`{
 	"type":"object",
 	"properties":{
-		"query":{"type":"string","description":"natural-language question, topic, or exact terms to match"},
-		"mode":{"type":"string","enum":["hybrid","semantic","keyword"],"description":"retrieval mode, default hybrid"},
-		"limit":{"type":"number","description":"max passages, default 10, max 30"},
-		"knowledge_ids":{"type":"array","items":{"type":"string"},"description":"optional document ids to restrict the search (from list_documents or previous results)"}
-	},
-	"required":["query"]
+		"query":{"description":"natural-language question, topic, or exact terms to match (required)","anyOf":[{"type":"string"},{"type":"null"}]},
+		"mode":{"description":"retrieval mode: hybrid (default), semantic, or keyword","anyOf":[{"type":"string"},{"type":"null"}]},
+		"limit":{"description":"max passages, default 10, max 30","anyOf":[{"type":"number"},{"type":"null"}]},
+		"knowledge_ids":{"description":"optional document ids to restrict the search (from list_documents or previous results)","anyOf":[{"type":"array","items":{"type":"string"}},{"type":"null"}]}
+	}
 }`),
 	}, env.handleSearchKnowledge)
-	callTool(server, env, &mcp.Tool{
+	callTool(server, &mcp.Tool{
 		Name:        "list_documents",
 		Description: "List the documents in this workspace's weknora knowledge base with pagination and optional filters. Returns document ids for read_document.",
 		InputSchema: json.RawMessage(`{
 	"type":"object",
 	"properties":{
-		"keyword":{"type":"string","description":"optional substring to filter document titles"},
-		"page":{"type":"number","description":"1-based page number, default 1"},
-		"page_size":{"type":"number","description":"documents per page, default 20, max 100"},
-		"parse_status":{"type":"string","description":"filter by parse status (e.g. completed, parsing, failed)"},
-		"file_type":{"type":"string","description":"filter by file extension"},
-		"sort_by":{"type":"string","enum":["created_at","updated_at","file_name"],"description":"default created_at"},
-		"sort_order":{"type":"string","enum":["asc","desc"],"description":"default desc"}
+		"keyword":{"description":"optional substring to filter document titles","anyOf":[{"type":"string"},{"type":"null"}]},
+		"page":{"description":"1-based page number, default 1","anyOf":[{"type":"number"},{"type":"null"}]},
+		"page_size":{"description":"documents per page, default 20, max 100","anyOf":[{"type":"number"},{"type":"null"}]},
+		"parse_status":{"description":"filter by parse status (e.g. completed, parsing, failed)","anyOf":[{"type":"string"},{"type":"null"}]},
+		"file_type":{"description":"filter by file extension","anyOf":[{"type":"string"},{"type":"null"}]},
+		"sort_by":{"description":"sort field: created_at (default), updated_at, or file_name","anyOf":[{"type":"string"},{"type":"null"}]},
+		"sort_order":{"description":"asc or desc (default desc)","anyOf":[{"type":"string"},{"type":"null"}]}
 	}
 }`),
 	}, env.handleListDocuments)
-	callTool(server, env, &mcp.Tool{
+	callTool(server, &mcp.Tool{
 		Name:        "read_document",
 		Description: "Read a document's text chunks in reading order from this workspace's weknora knowledge base. Page through with page/page_size.",
 		InputSchema: json.RawMessage(`{
 	"type":"object",
 	"properties":{
-		"knowledge_id":{"type":"string","description":"document id from list_documents or search results"},
-		"page":{"type":"number","description":"1-based page number, default 1"},
-		"page_size":{"type":"number","description":"chunks per page, default 10, max 100"},
-		"chunk_type":{"type":"array","items":{"type":"string"},"description":"chunk types to return, default [\"text\"]"}
-	},
-	"required":["knowledge_id"]
+		"knowledge_id":{"description":"document id from list_documents or search results (required)","anyOf":[{"type":"string"},{"type":"null"}]},
+		"page":{"description":"1-based page number, default 1","anyOf":[{"type":"number"},{"type":"null"}]},
+		"page_size":{"description":"chunks per page, default 10, max 100","anyOf":[{"type":"number"},{"type":"null"}]},
+		"chunk_type":{"description":"chunk types to return, default [\"text\"]","anyOf":[{"type":"array","items":{"type":"string"}},{"type":"null"}]}
+	}
 }`),
 	}, env.handleReadDocument)
 }
 
 // addWikiTools registers the three wiki browsing tools.
 func addWikiTools(server *mcp.Server, env *ServerEnv) {
-	callTool(server, env, &mcp.Tool{
+	callTool(server, &mcp.Tool{
 		Name:        "wiki_search",
 		Description: "Search the wiki pages of this workspace's weknora knowledge base by title, alias and content. Returns page slugs for wiki_read_page.",
 		InputSchema: json.RawMessage(`{
 	"type":"object",
 	"properties":{
-		"query":{"type":"string","description":"search terms or a regular expression (case-insensitive POSIX)"},
-		"regex":{"type":"boolean","description":"false forces literal match; true requires valid regex; omit for auto"},
-		"limit":{"type":"number","description":"max pages, default 10, max 50"}
-	},
-	"required":["query"]
+		"query":{"description":"search terms or a regular expression (case-insensitive POSIX) (required)","anyOf":[{"type":"string"},{"type":"null"}]},
+		"regex":{"description":"false forces literal match; true requires valid regex; omit for auto","anyOf":[{"type":"boolean"},{"type":"null"}]},
+		"limit":{"description":"max pages, default 10, max 50","anyOf":[{"type":"number"},{"type":"null"}]}
+	}
 }`),
 	}, env.handleWikiSearch)
-	callTool(server, env, &mcp.Tool{
+	callTool(server, &mcp.Tool{
 		Name:        "wiki_read_page",
 		Description: "Read one wiki page by slug, including content, metadata and out-links with inlined summaries (up to 10).",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"slug":{"type":"string","description":"page slug from wiki_search or wiki_index, e.g. concept/rag"}},"required":["slug"]}`),
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"slug":{"description":"page slug from wiki_search or wiki_index, e.g. concept/rag (required)","anyOf":[{"type":"string"},{"type":"null"}]}}}`),
 	}, env.handleWikiReadPage)
-	callTool(server, env, &mcp.Tool{
+	callTool(server, &mcp.Tool{
 		Name:        "wiki_index",
 		Description: "Browse the wiki table of contents of this workspace's weknora knowledge base: intro plus pages grouped by type.",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"limit":{"type":"number","description":"max entries per page type, default 50, max 200"}}}`),
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"limit":{"description":"max entries per page type, default 50, max 200","anyOf":[{"type":"number"},{"type":"null"}]}}}`),
 	}, env.handleWikiIndex)
 }
 
 // addIngestTools registers the write tools (add/update/delete document);
 // only called when env.Config.EnableIngest is set.
 func addIngestTools(server *mcp.Server, env *ServerEnv) {
-	callTool(server, env, &mcp.Tool{
+	callTool(server, &mcp.Tool{
 		Name: "add_document",
 		Description: "Add a document to this workspace's weknora knowledge base from Markdown text, a URL, or an S3 object (s3_key). " +
 			"Parsing and indexing happen asynchronously; the response returns the new document id.",
 		InputSchema: json.RawMessage(`{
 	"type":"object",
 	"properties":{
-		"title":{"type":"string","description":"document title (required; for s3_key defaults to the object's base name without .md)"},
-		"content":{"type":"string","description":"Markdown content; required unless url or s3_key is given"},
-		"url":{"type":"string","description":"web page or file URL to import; required unless content or s3_key is given"},
-		"s3_key":{"type":"string","description":"object key (or full object-store URL) in the configured bucket; required unless content or url is given"},
-		"publish":{"type":"boolean","description":"publish immediately (default true) or keep as draft"}
-	},
-	"required":["title"]
+		"title":{"description":"document title (required; for s3_key defaults to the object's base name without .md)","anyOf":[{"type":"string"},{"type":"null"}]},
+		"content":{"description":"Markdown content; required unless url or s3_key is given","anyOf":[{"type":"string"},{"type":"null"}]},
+		"url":{"description":"web page or file URL to import; required unless content or s3_key is given","anyOf":[{"type":"string"},{"type":"null"}]},
+		"s3_key":{"description":"object key (or full object-store URL) in the configured bucket; required unless content or url is given","anyOf":[{"type":"string"},{"type":"null"}]},
+		"publish":{"description":"publish immediately (default true) or keep as draft","anyOf":[{"type":"boolean"},{"type":"null"}]}
+	}
 }`),
 	}, env.handleAddDocument)
-	callTool(server, env, &mcp.Tool{
+	callTool(server, &mcp.Tool{
 		Name:        "update_document",
 		Description: "Replace the content (and optionally the title) of a Markdown document created from text. Re-indexing happens asynchronously.",
 		InputSchema: json.RawMessage(`{
 	"type":"object",
 	"properties":{
-		"knowledge_id":{"type":"string","description":"document id"},
-		"content":{"type":"string","description":"new Markdown content"},
-		"title":{"type":"string","description":"new title; keeps the current title when omitted"},
-		"publish":{"type":"boolean","description":"publish (default true) or keep as draft"}
-	},
-	"required":["knowledge_id","content"]
+		"knowledge_id":{"description":"document id (required)","anyOf":[{"type":"string"},{"type":"null"}]},
+		"content":{"description":"new Markdown content (required)","anyOf":[{"type":"string"},{"type":"null"}]},
+		"title":{"description":"new title; keeps the current title when omitted","anyOf":[{"type":"string"},{"type":"null"}]},
+		"publish":{"description":"publish (default true) or keep as draft","anyOf":[{"type":"boolean"},{"type":"null"}]}
+	}
 }`),
 	}, env.handleUpdateDocument)
-	callTool(server, env, &mcp.Tool{
+	callTool(server, &mcp.Tool{
 		Name:        "delete_document",
 		Description: "Permanently delete a document and its index data from this workspace's weknora knowledge base.",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"knowledge_id":{"type":"string","description":"document id"}},"required":["knowledge_id"]}`),
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"knowledge_id":{"description":"document id (required)","anyOf":[{"type":"string"},{"type":"null"}]}}}`),
 	}, env.handleDeleteDocument)
 }
 
@@ -405,6 +414,7 @@ func (env *ServerEnv) handleReadDocument(ctx context.Context, hdr http.Header, a
 	if strings.TrimSpace(knowledgeID) == "" {
 		return errPayload(errCodeMissingParam, "parameter \"knowledge_id\" is required", mc)
 	}
+	knowledgeID = strings.TrimSpace(knowledgeID)
 	if err := validateKnowledgeID(knowledgeID); err != nil {
 		return errPayload(errCodeInvalidParamValue, err.Error(), mc)
 	}
@@ -503,7 +513,11 @@ func (env *ServerEnv) handleWikiReadPage(ctx context.Context, hdr http.Header, a
 	if strings.TrimSpace(slug) == "" {
 		return errPayload(errCodeMissingParam, "parameter \"slug\" is required", mc)
 	}
-	page, err := env.WeKnora.WikiReadPage(ctx, m, strings.TrimSpace(slug))
+	slug = strings.TrimSpace(slug)
+	if err := validateWikiSlug(slug); err != nil {
+		return errPayload(errCodeInvalidParamValue, err.Error(), mc)
+	}
+	page, err := env.WeKnora.WikiReadPage(ctx, m, slug)
 	if err != nil {
 		return mapWeKnoraError(err, mc)
 	}
@@ -609,9 +623,14 @@ func (env *ServerEnv) handleAddDocument(ctx context.Context, hdr http.Header, ar
 	case strings.TrimSpace(docURL) != "":
 		doc, err = env.WeKnora.AddURLDocument(ctx, m, strings.TrimSpace(docURL), title)
 	default:
-		doc, err = env.addS3Document(ctx, m, title, strings.TrimSpace(s3key), publish, mc)
+		doc, err = env.addS3Document(ctx, m, title, strings.TrimSpace(s3key), publish)
 		if err != nil {
-			return s3ErrorPayload(err, mc)
+			if ste, ok := err.(*s3ToolError); ok {
+				return errPayload(ste.code, ste.msg, mc)
+			}
+			// the s3 phases succeeded; this failure is on the
+			// WeKnora upload side — use the WeKnora vocabulary.
+			return mapWeKnoraError(err, mc)
 		}
 	}
 	if err != nil {
@@ -633,11 +652,12 @@ func (env *ServerEnv) handleUpdateDocument(ctx context.Context, hdr http.Header,
 	if strings.TrimSpace(knowledgeID) == "" {
 		return errPayload(errCodeMissingParam, "parameter \"knowledge_id\" is required", mc)
 	}
+	knowledgeID = strings.TrimSpace(knowledgeID)
 	if err := validateKnowledgeID(knowledgeID); err != nil {
 		return errPayload(errCodeInvalidParamValue, err.Error(), mc)
 	}
 	content, _ := args["content"].(string)
-	if content == "" {
+	if strings.TrimSpace(content) == "" {
 		return errPayload(errCodeMissingParam, "parameter \"content\" is required", mc)
 	}
 	title, _ := args["title"].(string)
@@ -666,6 +686,7 @@ func (env *ServerEnv) handleDeleteDocument(ctx context.Context, hdr http.Header,
 	if strings.TrimSpace(knowledgeID) == "" {
 		return errPayload(errCodeMissingParam, "parameter \"knowledge_id\" is required", mc)
 	}
+	knowledgeID = strings.TrimSpace(knowledgeID)
 	if err := validateKnowledgeID(knowledgeID); err != nil {
 		return errPayload(errCodeInvalidParamValue, err.Error(), mc)
 	}
@@ -682,8 +703,11 @@ const weknoraMaxFileBytes = 50 * 1024 * 1024
 
 // addS3Document implements the s3_key source of add_document: fetch the
 // object, then route by extension — .md/.markdown to the manual (text)
-// endpoint, everything else to multipart file upload.
-func (env *ServerEnv) addS3Document(ctx context.Context, m *WorkspaceMapping, title, s3key string, publish bool, mc map[string]string) (json.RawMessage, error) {
+// endpoint, everything else to multipart file upload. Only the s3-side
+// phases (store nil / key resolve / Get) come back wrapped in
+// *s3ToolError; the WeKnora upload errors are returned as-is so
+// handleAddDocument can map them with the WeKnora vocabulary.
+func (env *ServerEnv) addS3Document(ctx context.Context, m *WorkspaceMapping, title, s3key string, publish bool) (json.RawMessage, error) {
 	if env.Store == nil {
 		return nil, &s3ToolError{code: errCodeS3Unavailable, msg: "s3 attachments are not configured (set S3_BUCKET / AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY)"}
 	}
@@ -719,15 +743,6 @@ type s3ToolError struct {
 }
 
 func (e *s3ToolError) Error() string { return e.msg }
-
-// s3ErrorPayload renders an s3-path error (s3ToolError or a mapped store
-// error) as a tool payload.
-func s3ErrorPayload(err error, mc map[string]string) []byte {
-	if ste, ok := err.(*s3ToolError); ok {
-		return errPayload(ste.code, ste.msg, mc)
-	}
-	return errPayload(errCodeS3FetchFailed, err.Error(), mc)
-}
 
 // mapS3GetError folds the object-store sentinel errors onto tool codes,
 // naming the bucket for not-found (bucket-attribution triage, email-mcp
