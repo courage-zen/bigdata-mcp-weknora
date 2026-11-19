@@ -98,7 +98,7 @@ docker run -d -p 8000:8000 \
   -e WEKNORA_WORKSPACE_MAP="ws-uuid-1:kb-uuid-1" \
   -e WEKNORA_WORKSPACE_ws-uuid-1_API_KEY=wk-xxx \
   -e MCP_AUTH_KEY=bearer-key \
-  ghcr.io/courage-zen/bigdata-mcp-weknora:v0.1.0
+  ghcr.io/courage-zen/bigdata-mcp-weknora:v0.1.1
 ```
 
 镜像：GHCR 多架构（amd64/arm64）；Release 附 linux 静态二进制与 air-gapped
