@@ -1,9 +1,12 @@
 FROM golang:1.26-alpine AS build
+ARG VERSION=dev
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY *.go ./
-RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/weknora-mcp .
+RUN CGO_ENABLED=0 go build -trimpath \
+    -ldflags="-s -w -X main.version=${VERSION}" \
+    -o /out/weknora-mcp .
 
 FROM alpine:3.20
 RUN adduser -D -u 10001 mcp

@@ -7,6 +7,11 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
+// version is the server version reported in MCP server info. Overridden at
+// build time: -ldflags="-X main.version=$(git describe --tags)"; bare
+// `go build` / `go test` carry "dev".
+var version = "dev"
+
 // NewHandler builds the full HTTP handler: /health + /mcp (stateless,
 // JSON-response streamable transport) behind bearer auth.
 func NewHandler(env *ServerEnv, authKeys string) http.Handler {
@@ -22,7 +27,7 @@ func NewHandler(env *ServerEnv, authKeys string) http.Handler {
 			len(env.Config.Mappings), env.Config.EnableIngest, s3State)))
 	})
 
-	server := mcp.NewServer(&mcp.Implementation{Name: "weknora-mcp", Version: "v0.1.0"}, nil)
+	server := mcp.NewServer(&mcp.Implementation{Name: "weknora-mcp", Version: version}, nil)
 	RegisterTools(server, env)
 
 	mux.Handle("/mcp", mcp.NewStreamableHTTPHandler(

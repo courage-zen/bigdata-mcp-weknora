@@ -44,7 +44,8 @@ jobs:
           GOARCH: ${{ matrix.arch }}
           CGO_ENABLED: "0"
         run: |
-          go build -trimpath -ldflags='-s -w' -o weknora-mcp .
+          VERSION="$(git describe --tags --always)"
+          go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o weknora-mcp .
           mkdir -p release
           tar -czf "release/weknora-mcp-linux-${{ matrix.arch }}.tar.gz" weknora-mcp
       - name: Smoke test (amd64 only)
@@ -128,6 +129,8 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ github.ref_name }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

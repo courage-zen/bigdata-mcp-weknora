@@ -209,7 +209,7 @@ func loadS3Config() *S3Config {
 	}
 	s3.UsePathStyle, s3.PathStyleExplicit = parsePathStyleEnv(s3Env("S3_USE_PATH_STYLE", ""), s3.EndpointURL != "" || s3.Endpoint != "")
 	s3.AllowedKeyPrefixes = splitCSV(s3Env("S3_KEY_PREFIXES", ""))
-	s3.MaxFileBytes = parseBytesEnv(s3Env("S3_MAX_FILE_BYTES", ""), 100*1024*1024)
+	s3.MaxFileBytes = parseBytesEnv("S3_MAX_FILE_BYTES", s3Env("S3_MAX_FILE_BYTES", ""), 100*1024*1024)
 	return s3
 }
 
@@ -231,9 +231,16 @@ func parseBoolEnv(name string, def bool) bool {
 	return def
 }
 
-func parseBytesEnv(raw string, def int64) int64 {
+// parseBytesEnv parses a byte-count env var; empty falls back to def, while
+// unparseable or non-positive values log and fall back to def (same loud-
+// misconfig policy as parseBoolEnv — a typo silently reverting a size cap
+// is a deployment surprise).
+func parseBytesEnv(name, raw string, def int64) int64 {
 	if n, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64); err == nil && n > 0 {
 		return n
+	}
+	if v := strings.TrimSpace(raw); v != "" {
+		log.Printf("config: %s=%q is not a valid positive byte count, using %d", name, v, def)
 	}
 	return def
 }

@@ -14,14 +14,15 @@ import (
 	"github.com/minio/minio-go/v7/pkg/credentials"
 )
 
-// ObjectStore reads attachment objects from the configured bucket. The
-// interface keeps the tool testable, mirroring MailSender.
+// ObjectStore reads document objects from the configured bucket. The
+// interface keeps the s3_key source testable without a live object store.
 type ObjectStore interface {
 	// Get fetches key, reading at most limit bytes: larger objects fail
 	// without buffering. A missing object returns ErrObjectNotFound; size
-	// rejections distinguish the two caps (S3 transport vs attachment);
-	// anything else wraps the underlying error — sanitized, no
-	// bucket/key/endpoint in the message.
+	// rejections distinguish the two caps (S3 transport vs the caller's
+	// limit — here the WeKnora 50 MB upload ceiling); anything else wraps
+	// the underlying error — sanitized, no bucket/key/endpoint in the
+	// message.
 	Get(key string, limit int64) ([]byte, error)
 }
 
