@@ -13,7 +13,7 @@ import (
 )
 
 func main() {
-	cfg, err := LoadConfig()
+	cfg, err := LoadConfig(os.Getenv("WEKNORA_CONFIG"))
 	if err != nil {
 		log.Fatalf("config: %v", err)
 	}

@@ -7,7 +7,35 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"go.yaml.in/yaml/v3"
 )
+
+// fileConfig is the YAML schema loaded from WEKNORA_CONFIG:
+//
+//	weknora:
+//	  base_url: http://host:28444
+//	  api_key: sk-...            # global default, inherited by workspaces
+//	  enable_ingest: false
+//	  workspaces:
+//	    - id: 11111111-2222-...  # full UUID or short prefix (MappingFor
+//	                             # prefix-matches the caller's header)
+//	      kb_id: 99999999-...
+//	      api_key: sk-...        # optional override (cross-tenant KB)
+//	      allowed_agent_ids: [prefix]
+type fileConfig struct {
+	WeKnora struct {
+		BaseURL      string `yaml:"base_url"`
+		APIKey       string `yaml:"api_key"`
+		EnableIngest bool   `yaml:"enable_ingest"`
+		Workspaces   []struct {
+			ID              string   `yaml:"id"`
+			KBID            string   `yaml:"kb_id"`
+			APIKey          string   `yaml:"api_key"`
+			AllowedAgentIDs []string `yaml:"allowed_agent_ids"`
+		} `yaml:"workspaces"`
+	} `yaml:"weknora"`
+}
 
 // WorkspaceMapping is one multica workspace → WeKnora KB binding with its
 // own API key and optional agent allowlist (prefix-match, pg-mcp style).
@@ -22,52 +50,15 @@ type WorkspaceMapping struct {
 
 // Config is the resolved server configuration.
 type Config struct {
-	BaseURL      string // WEKNORA_BASE_URL, no trailing slash
+	BaseURL      string // weknora.base_url, no trailing slash
 	Host         string // MCP_HOST, default 0.0.0.0
 	Port         int    // MCP_PORT, default 8000
-	EnableIngest bool   // WEKNORA_ENABLE_INGEST, default false
-	// Mappings keyed by workspace id. Keyed lookup is the hot path of
-	// every tool call.
+	EnableIngest bool   // weknora.enable_ingest, default false
+	// Mappings keyed by configured id (full UUID or short prefix). Keyed
+	// lookup is the hot path of every tool call.
 	Mappings map[string]*WorkspaceMapping
 	// S3 is nil when the trio is incomplete (s3_key source disabled).
 	S3 *S3Config
-}
-
-// parseWorkspaceMap parses WEKNORA_WORKSPACE_MAP: "ws1:kb1,ws2:kb2".
-// Both sides must be non-empty; duplicate ws or kb is a config error (the
-// 1:1 model makes duplicates a misconfiguration).
-func parseWorkspaceMap(raw string) (map[string]string, error) {
-	out := map[string]string{}
-	if strings.TrimSpace(raw) == "" {
-		return nil, fmt.Errorf("WEKNORA_WORKSPACE_MAP is required: comma-separated workspace_id:kb_id pairs")
-	}
-	seenKB := map[string]string{}
-	for i, pair := range strings.Split(raw, ",") {
-		pair = strings.TrimSpace(pair)
-		if pair == "" {
-			continue
-		}
-		ws, kb, ok := strings.Cut(pair, ":")
-		ws, kb = strings.TrimSpace(ws), strings.TrimSpace(kb)
-		if !ok || ws == "" || kb == "" {
-			return nil, fmt.Errorf("WEKNORA_WORKSPACE_MAP entry %d (%q) must be workspace_id:kb_id", i+1, pair)
-		}
-		if strings.Contains(ws, ":") || strings.Contains(kb, ":") {
-			return nil, fmt.Errorf("WEKNORA_WORKSPACE_MAP entry %d (%q) must be workspace_id:kb_id", i+1, pair)
-		}
-		if _, dup := out[ws]; dup {
-			return nil, fmt.Errorf("WEKNORA_WORKSPACE_MAP: duplicate workspace id %q", ws)
-		}
-		if prev, dup := seenKB[kb]; dup {
-			return nil, fmt.Errorf("WEKNORA_WORKSPACE_MAP: kb id %q mapped to both %q and %q (1 workspace = 1 KB)", kb, prev, ws)
-		}
-		out[ws] = kb
-		seenKB[kb] = ws
-	}
-	if len(out) == 0 {
-		return nil, fmt.Errorf("WEKNORA_WORKSPACE_MAP has no valid entries")
-	}
-	return out, nil
 }
 
 // splitCSV splits a comma-separated env var into trimmed non-empty parts.
@@ -81,18 +72,82 @@ func splitCSV(raw string) []string {
 	return out
 }
 
-// LoadConfig reads all env vars and validates the mapping table. A missing
-// per-mapping API key is a startup error naming every missing variable at
-// once (operators fix all of them in one pass).
-func LoadConfig() (*Config, error) {
+// LoadConfig reads the YAML config file (path from the caller; empty means
+// ./config.yaml), validates it fail-fast, then layers the env-only settings
+// (MCP_HOST / MCP_PORT, the S3 contract — the family boundary: deployment
+// plumbing stays env, weknora topology lives in the file). A missing or
+// unparseable file is a startup error: there is no env fallback for the
+// weknora section. Structure errors (empty base_url/workspaces, entry
+// fields, duplicates) fire before the key-resolution error so operators fix
+// the shape first, then the keys.
+func LoadConfig(path string) (*Config, error) {
+	if path == "" {
+		path = "config.yaml"
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read config %s: %w", path, err)
+	}
+	var fc fileConfig
+	if err := yaml.Unmarshal(data, &fc); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+
+	wk := fc.WeKnora
+	baseURL := strings.TrimRight(strings.TrimSpace(wk.BaseURL), "/")
+	if baseURL == "" {
+		return nil, fmt.Errorf("config %s: weknora.base_url is required (e.g. http://your-weknora-host:28444)", path)
+	}
+	if len(wk.Workspaces) == 0 {
+		return nil, fmt.Errorf("config %s: weknora.workspaces must have at least one entry", path)
+	}
+
 	cfg := &Config{
-		BaseURL: strings.TrimRight(strings.TrimSpace(os.Getenv("WEKNORA_BASE_URL")), "/"),
-		Host:    os.Getenv("MCP_HOST"),
-		Port:    8000,
+		BaseURL:      baseURL,
+		Port:         8000,
+		EnableIngest: wk.EnableIngest,
+		Mappings:     make(map[string]*WorkspaceMapping, len(wk.Workspaces)),
 	}
-	if cfg.BaseURL == "" {
-		return nil, fmt.Errorf("WEKNORA_BASE_URL is required (e.g. http://your-weknora-host:28444)")
+
+	seenKB := map[string]string{}
+	var missingKeys []string
+	for i, w := range wk.Workspaces {
+		id := strings.TrimSpace(w.ID)
+		kb := strings.TrimSpace(w.KBID)
+		if id == "" || kb == "" {
+			return nil, fmt.Errorf("config %s: workspaces[%d] must set both id and kb_id", path, i)
+		}
+		if _, dup := cfg.Mappings[id]; dup {
+			return nil, fmt.Errorf("config %s: duplicate workspace id %q", path, id)
+		}
+		if prev, dup := seenKB[kb]; dup {
+			return nil, fmt.Errorf("config %s: kb id %q mapped to both %q and %q (1 workspace = 1 KB)", path, kb, prev, id)
+		}
+		// Key resolution: per-workspace override, else the global default.
+		// Neither is a startup error (collected and reported after the
+		// structural pass).
+		apiKey := strings.TrimSpace(w.APIKey)
+		if apiKey == "" {
+			apiKey = strings.TrimSpace(wk.APIKey)
+		}
+		if apiKey == "" {
+			missingKeys = append(missingKeys, id)
+		}
+		cfg.Mappings[id] = &WorkspaceMapping{
+			WorkspaceID:     id,
+			KBID:            kb,
+			APIKey:          apiKey,
+			AllowedAgentIDs: w.AllowedAgentIDs,
+		}
+		seenKB[kb] = id
 	}
+	if len(missingKeys) > 0 {
+		sort.Strings(missingKeys)
+		return nil, fmt.Errorf("config %s: workspaces missing api_key (set weknora.api_key or a per-workspace api_key): %s",
+			path, strings.Join(missingKeys, ", "))
+	}
+
+	cfg.Host = os.Getenv("MCP_HOST")
 	if cfg.Host == "" {
 		cfg.Host = "0.0.0.0"
 	}
@@ -103,31 +158,6 @@ func LoadConfig() (*Config, error) {
 		}
 		cfg.Port = p
 	}
-	cfg.EnableIngest = strings.EqualFold(strings.TrimSpace(os.Getenv("WEKNORA_ENABLE_INGEST")), "true")
-
-	wsMap, err := parseWorkspaceMap(os.Getenv("WEKNORA_WORKSPACE_MAP"))
-	if err != nil {
-		return nil, err
-	}
-	cfg.Mappings = make(map[string]*WorkspaceMapping, len(wsMap))
-	var missingKeys []string
-	for ws, kb := range wsMap {
-		apiKey := strings.TrimSpace(os.Getenv("WEKNORA_WORKSPACE_" + ws + "_API_KEY"))
-		if apiKey == "" {
-			missingKeys = append(missingKeys, "WEKNORA_WORKSPACE_"+ws+"_API_KEY")
-		}
-		cfg.Mappings[ws] = &WorkspaceMapping{
-			WorkspaceID:     ws,
-			KBID:            kb,
-			APIKey:          apiKey,
-			AllowedAgentIDs: splitCSV(os.Getenv("WEKNORA_WORKSPACE_" + ws + "_ALLOWED_AGENT_IDS")),
-		}
-	}
-	if len(missingKeys) > 0 {
-		sort.Strings(missingKeys)
-		return nil, fmt.Errorf("per-mapping API keys are required; missing env: %s", strings.Join(missingKeys, ", "))
-	}
-
 	cfg.S3 = loadS3Config()
 	return cfg, nil
 }
