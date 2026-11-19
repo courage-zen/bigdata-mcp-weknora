@@ -57,8 +57,8 @@ add_document 的 s3_key 源用）。
    - `base_url` 空
    - `workspaces` 空列表
    - 条目 `id` 或 `kb_id` 空
-   - `id` 重复（含"全 UUID 与其前缀同时出现"以外的任意重复——短前缀与全 UUID 并存
-     是合法的不同粒度，精确匹配自然优先，无需特判）
+   - `id` 重复（精确字符串相等才叫重复；短前缀与以其为前缀的全 UUID 并存是合法的
+     不同粒度配置——header 等于全 UUID 时精确匹配自然优先，无需特判）
    - 同一 `kb_id` 映射到多个 workspace（保留 1:1 约束：workspace 隔离语义的根基，
      共享 KB 等真有需求再放）
    - yaml 语法错误（`parse <path>: <err>`）
