@@ -73,7 +73,7 @@ func (env *ServerEnv) resolveMapping(mc map[string]string) (*WorkspaceMapping, [
 	m, ok := env.Config.MappingFor(ws)
 	if !ok {
 		return nil, errPayload(errCodeWorkspaceNotMapped,
-			fmt.Sprintf("workspace %q is not mapped to a weknora knowledge base; ask the operator to add it to WEKNORA_WORKSPACE_MAP", ws), mc)
+			fmt.Sprintf("workspace %q is not mapped to a weknora knowledge base; ask the operator to add it to weknora.workspaces in the config file", ws), mc)
 	}
 	agentID := mc["agent_id"]
 	if agentID != "" && !m.AgentAllowed(agentID) {

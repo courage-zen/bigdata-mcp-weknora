@@ -192,7 +192,7 @@ func TestResolveMapping_Gates(t *testing.T) {
 func TestMapWeKnoraError_TransportFailure(t *testing.T) {
 	// A DNS/connection failure is neither *weknoraError nor a timeout —
 	// it must surface as WEKNORA_API_FAILED (the Task 7 release smoke
-	// depends on this against an unresolvable WEKNORA_BASE_URL), not
+	// depends on this against an unresolvable base_url), not
 	// INTERNAL.
 	payload := mapWeKnoraError(errors.New("weknora request failed: dial tcp: lookup weknora.invalid: no such host"), nil)
 	if r := decodePayload(t, payload); r.ErrorCode != "WEKNORA_API_FAILED" {
