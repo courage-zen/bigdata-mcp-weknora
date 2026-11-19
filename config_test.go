@@ -392,3 +392,45 @@ func TestAgentAllowed_PrefixMatch(t *testing.T) {
 		t.Error("empty agent id must fail against a non-empty allowlist")
 	}
 }
+
+// TestMappingFor_ExactAndPrefix pins the header-resolution order: exact
+// match first, then the longest configured id that is a prefix of the
+// caller's workspace id. Prefix matching is one-way (a configured full UUID
+// never matches a shorter header).
+func TestMappingFor_ExactAndPrefix(t *testing.T) {
+	cfg := &Config{Mappings: map[string]*WorkspaceMapping{
+		"11111111":                             {WorkspaceID: "11111111", KBID: "kb-short"},
+		"11111111-2222-3333-4444-555555555555": {WorkspaceID: "11111111-2222-3333-4444-555555555555", KBID: "kb-full"},
+	}}
+	// Full UUID header: exact match beats the same-id prefix entry.
+	m, ok := cfg.MappingFor("11111111-2222-3333-4444-555555555555")
+	if !ok || m.KBID != "kb-full" {
+		t.Fatalf("exact match: %+v ok=%v", m, ok)
+	}
+	// A different UUID sharing the 8-char prefix: only the short entry
+	// matches.
+	m, ok = cfg.MappingFor("11111111-ffffffff-ffff-ffff-ffffffffffff")
+	if !ok || m.KBID != "kb-short" {
+		t.Fatalf("prefix match: %+v ok=%v", m, ok)
+	}
+	// Longest prefix wins when several configured ids are prefixes.
+	cfg2 := &Config{Mappings: map[string]*WorkspaceMapping{
+		"1111":     {WorkspaceID: "1111", KBID: "kb-4"},
+		"11111111": {WorkspaceID: "11111111", KBID: "kb-8"},
+	}}
+	m, ok = cfg2.MappingFor("11111111-2222")
+	if !ok || m.KBID != "kb-8" {
+		t.Fatalf("longest prefix: %+v ok=%v", m, ok)
+	}
+	// Unmapped id resolves to nothing.
+	if _, ok := cfg.MappingFor("ws-other"); ok {
+		t.Fatal("unmapped id must not resolve")
+	}
+	// One-way: a configured full UUID is never a prefix of a shorter header.
+	cfg3 := &Config{Mappings: map[string]*WorkspaceMapping{
+		"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee": {WorkspaceID: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", KBID: "kb-x"},
+	}}
+	if _, ok := cfg3.MappingFor("aaaaaaaa"); ok {
+		t.Fatal("config id longer than header must not match")
+	}
+}

@@ -183,10 +183,25 @@ func LoadConfig(path string) (*Config, error) {
 	return cfg, nil
 }
 
-// MappingFor returns the mapping for a workspace id.
+// MappingFor resolves the caller's workspace id (X-Multica-Workspace-Id)
+// to its mapping: exact match first, then the longest configured id that is
+// a prefix of the caller's id (config may abbreviate UUIDs, e.g. "11111111"
+// matches the full UUID multica sends; a configured full UUID equals the
+// exact path). Prefix matching is one-way: a configured id longer than the
+// header never matches.
 func (c *Config) MappingFor(workspaceID string) (*WorkspaceMapping, bool) {
-	m, ok := c.Mappings[workspaceID]
-	return m, ok
+	if m, ok := c.Mappings[workspaceID]; ok {
+		return m, true
+	}
+	var best *WorkspaceMapping
+	for _, m := range c.Mappings {
+		if strings.HasPrefix(workspaceID, m.WorkspaceID) {
+			if best == nil || len(m.WorkspaceID) > len(best.WorkspaceID) {
+				best = m
+			}
+		}
+	}
+	return best, best != nil
 }
 
 // AgentAllowed applies the prefix-match allowlist: every configured entry
