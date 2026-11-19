@@ -6,6 +6,9 @@ weknora-mcp
 .env
 *.local.yaml
 
+# 82 集群部署清单（含内网 IP/UUID/API key 引用，永不入库）
+.k8s/
+
 # Go
 *.test
 *.out
