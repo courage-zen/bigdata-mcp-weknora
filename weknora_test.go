@@ -33,6 +33,41 @@ func TestWeKnoraClient_SendsAPIKeyAndPath(t *testing.T) {
 	}
 }
 
+// TestWeKnoraClient_IngestPaths pins the add-source endpoints against the
+// WeKnora routes: uploads live under /knowledge-bases/:id/knowledge/{manual,
+// url,file} — the /knowledge segment is part of the route (registered in
+// routes_knowledge.go), NOT /knowledge-bases/:id/{manual,url,file}.
+// v0.2.0 shipped the missing-segment paths and WeKnora 404'd every write.
+func TestWeKnoraClient_IngestPaths(t *testing.T) {
+	var gotPath, gotMethod string
+	respondOK := func(w http.ResponseWriter) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"success":true,"data":{"id":"k9"}}`)
+	}
+	c, m := fakeWeKnora(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotMethod = r.URL.Path, r.Method
+		respondOK(w)
+	})
+	if _, err := c.AddManualDocument(context.Background(), m, "T", "# hi", true); err != nil {
+		t.Fatal(err)
+	}
+	if want := "/api/v1/knowledge-bases/kb-1/knowledge/manual"; gotPath != want || gotMethod != "POST" {
+		t.Fatalf("manual: path=%q method=%q, want %s %s", gotPath, gotMethod, "POST", want)
+	}
+	if _, err := c.AddURLDocument(context.Background(), m, "http://x.test/a", ""); err != nil {
+		t.Fatal(err)
+	}
+	if want := "/api/v1/knowledge-bases/kb-1/knowledge/url"; gotPath != want {
+		t.Fatalf("url: path=%q, want %q", gotPath, want)
+	}
+	if _, err := c.AddFileDocument(context.Background(), m, "a.csv", []byte("x"), "text/csv"); err != nil {
+		t.Fatal(err)
+	}
+	if want := "/api/v1/knowledge-bases/kb-1/knowledge/file"; gotPath != want {
+		t.Fatalf("file: path=%q, want %q", gotPath, want)
+	}
+}
+
 func TestWeKnoraClient_ErrorBodyShapes(t *testing.T) {
 	c, m := fakeWeKnora(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)

@@ -255,7 +255,7 @@ func (w *weknoraClient) WikiIndex(ctx context.Context, m *WorkspaceMapping, limi
 }
 
 func (w *weknoraClient) AddManualDocument(ctx context.Context, m *WorkspaceMapping, title, content string, publish bool) (json.RawMessage, error) {
-	raw, err := w.doJSON(ctx, m, http.MethodPost, "/api/v1/knowledge-bases/"+pathSegments(m.KBID)+"/manual", map[string]any{
+	raw, err := w.doJSON(ctx, m, http.MethodPost, "/api/v1/knowledge-bases/"+pathSegments(m.KBID)+"/knowledge/manual", map[string]any{
 		"title":   title,
 		"content": content,
 		"status":  manualStatus(publish),
@@ -272,7 +272,7 @@ func (w *weknoraClient) AddURLDocument(ctx context.Context, m *WorkspaceMapping,
 	if title != "" {
 		body["title"] = title
 	}
-	raw, err := w.doJSON(ctx, m, http.MethodPost, "/api/v1/knowledge-bases/"+pathSegments(m.KBID)+"/url", body)
+	raw, err := w.doJSON(ctx, m, http.MethodPost, "/api/v1/knowledge-bases/"+pathSegments(m.KBID)+"/knowledge/url", body)
 	if err != nil {
 		return nil, err
 	}
@@ -304,7 +304,7 @@ func (w *weknoraClient) AddFileDocument(ctx context.Context, m *WorkspaceMapping
 	if err := mw.Close(); err != nil {
 		return nil, fmt.Errorf("build multipart: %w", err)
 	}
-	raw, err := w.do(ctx, m, http.MethodPost, "/api/v1/knowledge-bases/"+pathSegments(m.KBID)+"/file", mw.FormDataContentType(), &buf)
+	raw, err := w.do(ctx, m, http.MethodPost, "/api/v1/knowledge-bases/"+pathSegments(m.KBID)+"/knowledge/file", mw.FormDataContentType(), &buf)
 	if err != nil {
 		return nil, err
 	}
