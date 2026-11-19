@@ -18,6 +18,7 @@
 
 **Files:**
 - Modify: `config.go`（删 `parseWorkspaceMap`；重写 `LoadConfig`；`Config` 注释更新；`WorkspaceMapping` 注释更新；`MappingFor`/`AgentAllowed`/S3 系列本任务不动）
+- Modify: `main.go:16`（签名变更为 `LoadConfig(path string)`，main.go 是 package main 一部分，不随改则全包编不过）
 - Rewrite: `config_test.go`（整文件替换为 yaml 版测试）
 
 - [ ] **Step 1: 重写 config_test.go（新测试套件，先写全量失败测试）**
@@ -506,6 +507,14 @@ func LoadConfig(path string) (*Config, error) {
 
 `Config` 结构体注释同步改（`BaseURL` ← `weknora.base_url`，`EnableIngest` ← `weknora.enable_ingest`，Mappings 注释加"keyed by configured id (full UUID or short prefix)"）。
 
+同 commit 改 `main.go:16` 调用（否则 package main 编不过）：
+
+```go
+	cfg, err := LoadConfig(os.Getenv("WEKNORA_CONFIG"))
+```
+
+（main.go 已 import os，无需改 import。）
+
 - [ ] **Step 4: go mod tidy 并跑测试**
 
 Run: `go mod tidy && go test ./...`
@@ -514,7 +523,7 @@ Expected: `go mod tidy` 把 `go.yaml.in/yaml/v3` 从 `// indirect` 提为直接�
 - [ ] **Step 5: Commit**
 
 ```bash
-git add config.go config_test.go go.mod go.sum
+git add config.go config_test.go main.go go.mod go.sum
 git commit -m "feat!: load weknora config from YAML (WEKNORA_CONFIG)
 
 Breaking: WEKNORA_BASE_URL / WEKNORA_WORKSPACE_MAP /
@@ -632,38 +641,22 @@ Co-Authored-By: Claude Code <noreply@anthropic.com>"
 
 ---
 
-### Task 3: main.go 调用点 + 清理 + 全量构建
+### Task 3: 全量构建核验 + 无残留 env 引用
 
 **Files:**
-- Modify: `main.go:16`
-- Verify: 无残留 env 引用
+- Verify: 无残留 env 引用（main.go 调用点已随 Task 1 同 commit 改掉）
 
-- [ ] **Step 1: 改 main.go 的 LoadConfig 调用**
-
-```go
-	cfg, err := LoadConfig(os.Getenv("WEKNORA_CONFIG"))
-```
-
-（main.go 已 import os，无需改 import。）
-
-- [ ] **Step 2: 确认无残留 WEKNORA_ env 引用**
+- [ ] **Step 1: 确认无残留 WEKNORA_ env 引用**
 
 Run: `grep -rn "WEKNORA_" *.go | grep -v _test`
 Expected: 仅 main.go 一处 `WEKNORA_CONFIG`。若出现 `WEKNORA_BASE_URL`/`WEKNORA_WORKSPACE` 等残留，逐处清理（README 与 `.k8s/` 在后续任务处理，不算残留）。
 
-- [ ] **Step 3: 全量测试 + 构建 + vet**
+- [ ] **Step 2: 全量测试 + 构建 + vet**
 
 Run: `go vet ./... && go test ./... && go build -o /tmp/weknora-mcp-v020 . && /tmp/weknora-mcp-v020 2>&1 | head -2`
 Expected: vet 干净、测试全 PASS、二进制启动报 `read config config.yaml: ...` 退出（无配置文件时的 fail-fast，正是预期行为）。
 
-- [ ] **Step 4: Commit**
-
-```bash
-git add main.go
-git commit -m "feat: main reads WEKNORA_CONFIG path
-
-Co-Authored-By: Claude Code <noreply@anthropic.com>"
-```
+（main.go 调用点已随 Task 1 同 commit 改掉，本任务无代码改动，无 commit。）
 
 ---
 
