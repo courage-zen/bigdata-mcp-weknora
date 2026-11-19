@@ -51,14 +51,18 @@ jobs:
       - name: Smoke test (amd64 only)
         if: matrix.arch == 'amd64'
         run: |
-          # `env` launcher: the smoke workspace id contains hyphens
-          # (smoke-ws), and POSIX prefix-assignment syntax rejects
-          # hyphenated identifiers — bash would treat
-          # WEKNORA_WORKSPACE_smoke-ws_API_KEY=... as the command name.
-          env \
-            WEKNORA_BASE_URL=http://weknora.invalid \
-            WEKNORA_WORKSPACE_MAP=smoke-ws:smoke-kb \
-            WEKNORA_WORKSPACE_smoke-ws_API_KEY=smoke-key \
+          # Config comes from the YAML file (WEKNORA_CONFIG); base_url is
+          # deliberately unresolvable so a search must surface
+          # WEKNORA_API_FAILED through the full resolve/request path.
+          cat > config.yaml <<'EOF'
+          weknora:
+            base_url: http://weknora.invalid
+            api_key: smoke-key
+            workspaces:
+              - id: smoke-ws
+                kb_id: smoke-kb
+          EOF
+          WEKNORA_CONFIG=./config.yaml \
             MCP_AUTH_KEY=smoke-key MCP_PORT=8123 \
             ./weknora-mcp > server.log 2>&1 &
           server_pid=$!
