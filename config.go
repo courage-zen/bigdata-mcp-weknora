@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"sort"
@@ -61,15 +64,22 @@ type Config struct {
 	S3 *S3Config
 }
 
-// splitCSV splits a comma-separated env var into trimmed non-empty parts.
-func splitCSV(raw string) []string {
+// sanitizeAllowlist trims and drops empty entries. yaml list syntax lets
+// "" and whitespace-only entries through; "" would prefix-match every
+// agent id — a fail-open misconfig.
+func sanitizeAllowlist(raw []string) []string {
 	var out []string
-	for _, part := range strings.Split(raw, ",") {
-		if s := strings.TrimSpace(part); s != "" {
+	for _, a := range raw {
+		if s := strings.TrimSpace(a); s != "" {
 			out = append(out, s)
 		}
 	}
 	return out
+}
+
+// splitCSV splits a comma-separated env var into trimmed non-empty parts.
+func splitCSV(raw string) []string {
+	return sanitizeAllowlist(strings.Split(raw, ","))
 }
 
 // LoadConfig reads the YAML config file (path from the caller; empty means
@@ -81,15 +91,26 @@ func splitCSV(raw string) []string {
 // fields, duplicates) fire before the key-resolution error so operators fix
 // the shape first, then the keys.
 func LoadConfig(path string) (*Config, error) {
-	if path == "" {
+	usedDefault := path == ""
+	if usedDefault {
 		path = "config.yaml"
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
+		if usedDefault {
+			return nil, fmt.Errorf("read config %s (default path; set WEKNORA_CONFIG to your config file): %w", path, err)
+		}
 		return nil, fmt.Errorf("read config %s: %w", path, err)
 	}
 	var fc fileConfig
-	if err := yaml.Unmarshal(data, &fc); err != nil {
+	// KnownFields turns field typos into startup errors (an
+	// "allowed_agents_ids" typo would otherwise silently drop the allowlist
+	// — fail-open). Decode returns io.EOF for an empty or comment-only
+	// file; treat that as an empty config and let the required-field
+	// checks below give the friendlier error.
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode(&fc); err != nil && !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
 
@@ -137,7 +158,7 @@ func LoadConfig(path string) (*Config, error) {
 			WorkspaceID:     id,
 			KBID:            kb,
 			APIKey:          apiKey,
-			AllowedAgentIDs: w.AllowedAgentIDs,
+			AllowedAgentIDs: sanitizeAllowlist(w.AllowedAgentIDs),
 		}
 		seenKB[kb] = id
 	}

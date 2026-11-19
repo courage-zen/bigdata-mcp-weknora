@@ -39,11 +39,12 @@ func unsetS3Env(t *testing.T) {
 	}
 }
 
-// baseEnv pins the env the loader still reads (MCP_PORT default guard, S3
-// empty) — yaml config goes through writeConfig, not env.
+// baseEnv pins the env the loader still reads (MCP_HOST/MCP_PORT default
+// guards, S3 empty) — yaml config goes through writeConfig, not env.
 func baseEnv(t *testing.T) {
 	t.Helper()
 	unsetS3Env(t)
+	t.Setenv("MCP_HOST", "")
 	t.Setenv("MCP_PORT", "")
 }
 
@@ -221,6 +222,15 @@ func TestLoadConfig_MissingFile(t *testing.T) {
 	}
 }
 
+func TestLoadConfig_DefaultPath(t *testing.T) {
+	baseEnv(t)
+	t.Chdir(t.TempDir()) // cwd has no config.yaml
+	_, err := LoadConfig("")
+	if err == nil || !strings.Contains(err.Error(), "config.yaml") || !strings.Contains(err.Error(), "WEKNORA_CONFIG") {
+		t.Fatalf("want default-path read error hinting WEKNORA_CONFIG, got %v", err)
+	}
+}
+
 func TestLoadConfig_BaseURLTrailingSlash(t *testing.T) {
 	baseEnv(t)
 	cfg, err := LoadConfig(writeConfig(t, `weknora:
@@ -290,6 +300,46 @@ func TestLoadConfig_AllowlistFromYAML(t *testing.T) {
 	}
 	if !m.AgentAllowed("ag-1-x") {
 		t.Error("allowlist prefix match must accept ag-1-x")
+	}
+}
+
+func TestLoadConfig_AllowlistSanitized(t *testing.T) {
+	baseEnv(t)
+	cfg, err := LoadConfig(writeConfig(t, `weknora:
+  base_url: http://weknora.test
+  api_key: wk
+  workspaces:
+    - id: ws-1
+      kb_id: kb-1
+      allowed_agent_ids: ["", " ag-1 ", "ag-2"]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, _ := cfg.MappingFor("ws-1")
+	if len(m.AllowedAgentIDs) != 2 || m.AllowedAgentIDs[0] != "ag-1" || m.AllowedAgentIDs[1] != "ag-2" {
+		t.Fatalf("allowlist after sanitize: %v", m.AllowedAgentIDs)
+	}
+	if !m.AgentAllowed("ag-1-x") {
+		t.Error("trimmed prefix must match")
+	}
+	if m.AgentAllowed("ag-9") {
+		t.Error("empty entry must not fail open")
+	}
+}
+
+func TestLoadConfig_UnknownFieldRejected(t *testing.T) {
+	baseEnv(t)
+	_, err := LoadConfig(writeConfig(t, `weknora:
+  base_url: http://weknora.test
+  api_key: wk
+  workspaces:
+    - id: ws-1
+      kb_id: kb-1
+      allowed_agents_ids: [ag-1]
+`))
+	if err == nil || !strings.Contains(err.Error(), "parse ") || !strings.Contains(err.Error(), "allowed_agents_ids") {
+		t.Fatalf("want parse error naming the unknown field, got %v", err)
 	}
 }
 
