@@ -8,7 +8,7 @@ multica agent → multica-stdio-mcp-proxy → weknora-mcp :8000/mcp → WeKnora 
 ```
 
 - Streamable HTTP transport（stateless、JSON response），Bearer 认证（MCP_AUTH_KEY）
-- 工作区路由：X-Multica-Workspace-Id → WEKNORA_WORKSPACE_MAP → (kb_id, 每工作区独立 API Key)
+- 工作区路由：X-Multica-Workspace-Id → 配置文件 workspaces 映射（id 精确/前缀匹配）→ (kb_id, API Key)
 - 10 个工具：检索 4（list_knowledge_bases / search_knowledge / list_documents /
   read_document）+ wiki 3（wiki_search / wiki_read_page / wiki_index）+
   写入 3（add_document / update_document / delete_document，默认关闭）
@@ -17,13 +17,32 @@ multica agent → multica-stdio-mcp-proxy → weknora-mcp :8000/mcp → WeKnora 
 
 ## 配置
 
+### 配置文件（WEKNORA_CONFIG，默认 ./config.yaml）
+
+workspace→KB 拓扑全部在 YAML 文件里（无 env 兜底，文件缺失/不合法 = 启动失败）：
+
+```yaml
+weknora:
+  base_url: http://your-weknora-host:28444   # 必填
+  api_key: sk-...                             # 全局默认（单租户部署只配这个）
+  enable_ingest: false                        # 写入工具开关，默认 false
+
+  workspaces:                                 # ≥1 条
+    - id: 11111111-2222-3333-4444-555555555555  # 全 UUID 或短前缀均可
+      kb_id: 99999999-8888-7777-6666-555555555555
+      # api_key: 省略 → 继承全局；映射跨租户 KB 时覆盖
+      # allowed_agent_ids: [agent-uuid-prefix]  # 可选，前缀匹配
+```
+
+- **key 解析**：workspace 生效 key = 自身 `api_key`，缺省继承全局；两者皆无 → 启动报错并列出所有缺 key 的 workspace
+- **id 匹配**：header `X-Multica-Workspace-Id` 精确匹配优先；无精确命中取最长前缀（配置 `11111111` 匹配全 UUID）
+- **校验**：`base_url`/`workspaces`/条目字段空、id 重复、同一 KB 映射多个 workspace → 启动失败（1 workspace = 1 KB）
+
+### 环境变量
+
 | 环境变量 | 必填 | 说明 |
 | --- | --- | --- |
-| WEKNORA_BASE_URL | 是 | WeKnora 实例地址 |
-| WEKNORA_WORKSPACE_MAP | 是 | "ws-id:kb-id" 逗号分隔 |
-| WEKNORA_WORKSPACE_<ws-id>_API_KEY | 是 | 每映射独立 WeKnora API Key |
-| WEKNORA_WORKSPACE_<ws-id>_ALLOWED_AGENT_IDS | 否 | agent 白名单（前缀匹配） |
-| WEKNORA_ENABLE_INGEST | 否 | true 开启写入工具，默认 false |
+| WEKNORA_CONFIG | 否 | 配置文件路径，默认 ./config.yaml |
 | MCP_AUTH_KEY | 否 | Bearer key，逗号分隔；空 = 无认证 |
 | MCP_HOST / MCP_PORT | 否 | 默认 0.0.0.0:8000 |
 
@@ -69,7 +88,7 @@ S3_USE_PATH_STYLE / S3_KEY_PREFIXES / S3_MAX_FILE_BYTES。
 | `wiki_read_page` | `slug`* | 读整页 Markdown 与元数据；出链自动内联摘要（上限 10 个，超出标 out_links_omitted） |
 | `wiki_index` | `limit`（默认 50，上限 200） | wiki 目录：intro + 按类型分组 |
 
-### 写入 3 个（`WEKNORA_ENABLE_INGEST=true` 时注册）
+### 写入 3 个（配置 `enable_ingest: true` 时注册）
 
 | 工具 | 参数 | 说明 |
 | --- | --- | --- |
@@ -94,12 +113,13 @@ S3_USE_PATH_STYLE / S3_KEY_PREFIXES / S3_MAX_FILE_BYTES。
 
 ```bash
 docker run -d -p 8000:8000 \
-  -e WEKNORA_BASE_URL=http://your-weknora-host:port \
-  -e WEKNORA_WORKSPACE_MAP="ws-uuid-1:kb-uuid-1" \
-  -e WEKNORA_WORKSPACE_ws-uuid-1_API_KEY=wk-xxx \
+  -v $PWD/config.yaml:/app/config.yaml \
+  -e WEKNORA_CONFIG=/app/config.yaml \
   -e MCP_AUTH_KEY=bearer-key \
-  ghcr.io/courage-zen/bigdata-mcp-weknora:v0.1.1
+  ghcr.io/courage-zen/bigdata-mcp-weknora:v0.2.0
 ```
+
+配置文件含 api_key（敏感），挂载时注意权限；k8s 场景放 Secret。
 
 镜像：GHCR 多架构（amd64/arm64）；Release 附 linux 静态二进制与 air-gapped
 镜像 tar（含 checksums）。
