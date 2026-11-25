@@ -9,9 +9,11 @@ multica agent → multica-stdio-mcp-proxy → weknora-mcp :8000/mcp → WeKnora 
 
 - Streamable HTTP transport（stateless、JSON response），Bearer 认证（MCP_AUTH_KEY）
 - 工作区路由：X-Multica-Workspace-Id → 配置文件 workspaces 映射（id 精确/前缀匹配）→ (kb_id, API Key)
-- 10 个工具：检索 4（list_knowledge_bases / search_knowledge / list_documents /
+- 15 个工具：检索 4（list_knowledge_bases / search_knowledge / list_documents /
   read_document）+ wiki 3（wiki_search / wiki_read_page / wiki_index）+
-  写入 3（add_document / update_document / delete_document，默认关闭）
+  写入 3（add_document / update_document / delete_document）+ wiki 写入 5
+  （wiki_create_page / wiki_update_page / wiki_delete_page / wiki_create_folder /
+  wiki_move_page）——后两组默认关闭，`enable_ingest: true` 时注册
 - add_document 三源：Markdown 文本 / URL / s3_key（S3 对象按后缀分流）
 - 结果统一携带 multica_context 回显；错误带 error + error_code
 
@@ -88,13 +90,18 @@ S3_USE_PATH_STYLE / S3_KEY_PREFIXES / S3_MAX_FILE_BYTES。
 | `wiki_read_page` | `slug`* | 读整页 Markdown 与元数据；出链自动内联摘要（上限 10 个，超出标 out_links_omitted） |
 | `wiki_index` | `limit`（默认 50，上限 200） | wiki 目录：intro + 按类型分组 |
 
-### 写入 3 个（配置 `enable_ingest: true` 时注册）
+### 写入 8 个（配置 `enable_ingest: true` 时注册）
 
 | 工具 | 参数 | 说明 |
 | --- | --- | --- |
 | `add_document` | `title`*、`content`\|`url`\|`s3_key`（互斥，恰好其一）、`publish`（默认 true） | 三源入库，异步提交即返回 document id；s3_key 按对象后缀分流（.md → 文本，其他 → 文件上传） |
 | `update_document` | `knowledge_id`*、`content`*、`title`、`publish` | 替换 Markdown 文档内容/标题 |
 | `delete_document` | `knowledge_id`* | 永久删除文档及索引数据（异步任务） |
+| `wiki_create_page` | `slug`*、`title`、`content`、`summary`、`page_type`（summary/entity/concept/index/synthesis/comparison）、`status`（draft/published/archived，默认 published）、`aliases`（数组）、`source_refs`（数组，条目 `<knowledge_id>` 或 `<knowledge_id>\|<title>`）、`folder_id` | 创建 wiki 页面；slug 全库唯一，撞已有 slug 会报错（唯一索引冲突透传）；page_type 缺省由服务端默认 |
+| `wiki_update_page` | `slug`*、`title`、`content`、`summary`、`page_type`、`status`、`aliases`（数组）、`version`（乐观锁，须为整数） | 更新 wiki 页面；缺席字段保持原值（服务端合并语义），传了才改；`version` 与服务端不一致时报冲突 |
+| `wiki_delete_page` | `slug`* | 删除 wiki 页面 |
+| `wiki_create_folder` | `name`*、`parent_id` | 创建 wiki 目录（parent_id 缺省为根） |
+| `wiki_move_page` | `slug`*、`folder_id` | 移动页面到目录；`folder_id` 缺省或空串 = 移回 wiki 根 |
 
 ### 错误码
 
@@ -116,7 +123,7 @@ docker run -d -p 8000:8000 \
   -v $PWD/config.yaml:/app/config.yaml \
   -e WEKNORA_CONFIG=/app/config.yaml \
   -e MCP_AUTH_KEY=bearer-key \
-  ghcr.io/courage-zen/bigdata-mcp-weknora:v0.2.0
+  ghcr.io/courage-zen/bigdata-mcp-weknora:v0.3.0
 ```
 
 配置文件含 api_key（敏感），挂载时注意权限；k8s 场景放 Secret。
