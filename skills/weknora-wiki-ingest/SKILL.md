@@ -14,10 +14,13 @@ description: Use when asked to add a document to the wiki, sync wiki pages from 
 
 ## Step 0：前置检查（任何一项不满足 → 停止并告知用户，不继续）
 
-1. **内部生成必须已关闭**：目标 KB 的 `wiki_config.synthesis_model_id` 与
-   `summary_model_id` 均已清空（由管理员经 WeKnora 控制台或
-   `PUT /api/v1/knowledgebase/{id}` 完成，见 runbook）。本 skill 无法经 REST 查询或
-   修改该配置；若不确定已清空，**停止并要求用户确认**——否则内外两条管线会打架。
+1. **内部生成必须已停**：`list_knowledge_bases` 找到目标 KB，检查其
+   `wiki_config.synthesis_model_id` 与 `summary_model_id`。内部管线的模型解析：
+   synthesis_model_id 空 → 回退 summary_model_id。停用条件（二选一满足即可）：
+   - `wiki_config.synthesis_model_id` 指向一个**不存在的模型**（停用 sentinel id，
+     见 runbook——模型查不到时内部管线直接放行文档、不生成 wiki 页）；或
+   - synthesis_model_id 与 summary_model_id 均为空。
+   两个 id 都存在且可解析 → 内部管线还活着，**停止**，让用户按 runbook 停用后重跑。
 2. **wiki 可读**：`wiki_index` 正常返回（它同时是后面 index 步骤的服务端懒物化入口）。
    若报错 → 停止并报告错误。
 3. **文档解析完成**：`list_documents` 找到该 `knowledge_id`，其 `parse_status` 为
@@ -59,12 +62,20 @@ description: Use when asked to add a document to the wiki, sync wiki pages from 
 1. **命中同型且标题/别名相同**（如候选 entity/RAG 命中既有页 entity/rag，标题相同或
    互为别名）→ **合并**：复用既有 slug，走 `wiki_update_page`，把本次 `details` 按
    下面的编辑规则并入既有 content。aliases 并集。**不要 `wiki_create_page`**。
-2. **不同型但同 slug**（候选 concept/foo，既有 entity/foo）→ slug 冲突：把候选项
-   slug 加后缀重生成（如 `concept/foo-2`），新建。
+2. **既有页与候选项 slug 字符串相同但类型不同**（如一页 `page_type=entity` 的页占着
+   `concept/foo`）→ slug 冲突：把候选项 slug 加后缀重生成（如 `concept/foo-2`），
+   新建。
 3. **仅相似不同一**（如 entity/RAG 与 entity/Retrieval-Augmented-Generation 是两页）
    → 新建。
 4. **大 KB 多轮**：任一 `wiki_search` 返回打满 50 条 → 改写 query 收窄（加类型前缀
    `entity foo`、加限定词）再搜一轮，仍打满则按 1-3 判定。
+
+**新建页的完整形状**（走 2/3 分支新建 entity/concept 页时，参数一个不缺）：
+`wiki_create_page(slug=<候选项 slug>, title=<name>, content=<details 组织成的正文>,
+summary=<description 索引行>, page_type=<entity|concept>, aliases=<aliases 数组>,
+source_refs=["<knowledge_id>"])`。`source_refs` 必须带上——文档删除时服务端按
+source_refs 找页收缩/删除，不带的页在删除清理中不可见、会留成过期页。
+（合并分支无法追加 source_refs——REST 不改已有页的 source_refs，接受该限制。）
 
 **编辑规则**（并入既有 content 时，对齐内部 `WikiPageModifySystemPrompt`）：
 - 你是编译器不是作者：只组织本次文档给出的信息，不创作、不外推
@@ -76,9 +87,10 @@ description: Use when asked to add a document to the wiki, sync wiki pages from 
 summary 页 slug：`summary/<knowledge_id>`（knowledge_id 是 UUID，slugify 恒等，可复现）。
 
 - **新建文档**：`wiki_create_page(slug="summary/<knowledge_id>", title="<doc_title> - Summary",
-  page_type="summary", source_refs=["<knowledge_id>"], content=…)`。content 页首一行
-  `SUMMARY: <15-40 词>`，正文按本次抽取的页逐段小结，每段内链 `[[entity/foo]]` /
-  `[[concept/foo]]`。
+  page_type="summary", source_refs=["<knowledge_id>"], summary=<15-40 词索引行>,
+  content=…)`。content 正文按本次抽取的页逐段小结，每段内链 `[[entity/foo]]` /
+  `[[concept/foo]]`。**`summary` 参数单独传**（内部管线把 SUMMARY 行拆进页的
+  summary 字段——它是 wiki_index 目录行与 wiki_search 排序字段，别只埋在 content 里）。
 - **重灌文档**（该 summary 页已存在）：先 `wiki_read_page("summary/<knowledge_id>")`
   读旧页，从旧页 content 的 `[[链接]]` 集合提取“上次贡献”清单，然后 reconcile：
   - 旧 slug ∈ 新抽取 → 该页走 Step 3 的合并 update
@@ -86,7 +98,8 @@ summary 页 slug：`summary/<knowledge_id>`（knowledge_id 是 UUID，slugify �
     （`wiki_update_page`）。若收缩后页 content 已是空壳（无实质段落，仅剩标题/
     SUMMARY 行）→ 整页 `wiki_delete_page`。**按内容空判定，不数 source_refs**——
     REST 改不了 source_refs，残留条目无法摘除，只能靠内容收敛表达“本 doc 不再支撑”。
-  - summary 页本身 → 整页覆写（不 merge，直接 `wiki_update_page` 写新 content）
+  - summary 页本身 → 整页覆写（不 merge，直接 `wiki_update_page` 写新 content 与
+    summary）
 
 ## Step 5：目录归类 + index intro 更新
 
@@ -102,7 +115,8 @@ summary 页 slug：`summary/<knowledge_id>`（knowledge_id 是 UUID，slugify �
    `GET /wiki/index` 懒物化缺省 index 行；`wiki_read_page(slug="index")` 不触发懒创建，
    全新 KB 上会 404，不要用它做首次读取。
 2. 分支：
-   - intro 为空或默认占位（`"# Wiki Index\n\nThis is the index page..."` 形状）→
+   - intro 为空、或两种默认占位形状之一（`"# Wiki Index\n\nThis is the index page..."`
+     或历史占位 `"Wiki index - table of contents"`）→
      **首建分支**：聚合本批 summary 页标题 + SUMMARY 行，从零写 intro。
    - 否则 → **增量分支**：拿现有 intro + 本批变更描述（`<document_added/removed>`），
      重写 intro。语义对齐内部 update prompt：保持现有语气；只加显著扩范围的新主题；
