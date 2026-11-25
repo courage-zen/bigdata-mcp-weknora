@@ -35,6 +35,9 @@ type fakeWeKnoraCaller struct {
 	wikiFolderParent    string
 	wikiMoveSlug        string
 	wikiMoveFolder      string
+	// error injection
+	wikiCreatePageErr error
+	wikiUpdateErr     error
 	addManualTitle   string
 	addManualContent string
 	addManualPub     bool
@@ -88,6 +91,9 @@ func (f *fakeWeKnoraCaller) WikiCreatePage(ctx context.Context, m *WorkspaceMapp
 		call[k] = v
 	}
 	f.wikiCreatePageCalls = append(f.wikiCreatePageCalls, call)
+	if f.wikiCreatePageErr != nil {
+		return nil, f.wikiCreatePageErr
+	}
 	return map[string]any{"slug": page["slug"], "version": 2}, nil
 }
 func (f *fakeWeKnoraCaller) WikiUpdatePage(ctx context.Context, m *WorkspaceMapping, slug string, fields map[string]any) (map[string]any, error) {
@@ -97,6 +103,9 @@ func (f *fakeWeKnoraCaller) WikiUpdatePage(ctx context.Context, m *WorkspaceMapp
 	}
 	f.wikiUpdateSlugs = append(f.wikiUpdateSlugs, slug)
 	f.wikiUpdateFields = append(f.wikiUpdateFields, call)
+	if f.wikiUpdateErr != nil {
+		return nil, f.wikiUpdateErr
+	}
 	return map[string]any{"slug": slug, "version": 2}, nil
 }
 func (f *fakeWeKnoraCaller) WikiDeletePage(ctx context.Context, m *WorkspaceMapping, slug string) error {
@@ -174,6 +183,21 @@ func envWikiSearch(env *ServerEnv, hdr http.Header, args map[string]any) []byte 
 }
 func envWikiIndex(env *ServerEnv, hdr http.Header, args map[string]any) []byte {
 	return env.handleWikiIndex(context.Background(), hdr, args)
+}
+func envWikiCreatePage(env *ServerEnv, hdr http.Header, args map[string]any) []byte {
+	return env.handleWikiCreatePage(context.Background(), hdr, args)
+}
+func envWikiUpdatePage(env *ServerEnv, hdr http.Header, args map[string]any) []byte {
+	return env.handleWikiUpdatePage(context.Background(), hdr, args)
+}
+func envWikiDeletePage(env *ServerEnv, hdr http.Header, args map[string]any) []byte {
+	return env.handleWikiDeletePage(context.Background(), hdr, args)
+}
+func envWikiCreateFolder(env *ServerEnv, hdr http.Header, args map[string]any) []byte {
+	return env.handleWikiCreateFolder(context.Background(), hdr, args)
+}
+func envWikiMovePage(env *ServerEnv, hdr http.Header, args map[string]any) []byte {
+	return env.handleWikiMovePage(context.Background(), hdr, args)
 }
 func envDeleteDocument(env *ServerEnv, hdr http.Header, args map[string]any) []byte {
 	return env.handleDeleteDocument(context.Background(), hdr, args)
@@ -513,6 +537,178 @@ func TestAddDocument_S3UploadFailureIsWeKnoraError(t *testing.T) {
 	payload := envAddDocument(env, wsHeaders(), map[string]any{"title": "T", "s3_key": "docs/a.md"})
 	if r := decodePayload(t, payload); r.ErrorCode != "WEKNORA_API_FAILED" {
 		t.Fatalf("code = %q, want WEKNORA_API_FAILED", r.ErrorCode)
+	}
+}
+
+// fake 扩展字段（error injection）在 fakeWeKnoraCaller struct 定义处。
+
+func TestWikiWriteTools_HappyPaths(t *testing.T) {
+	fake := &fakeWeKnoraCaller{}
+	env := testEnv(fake)
+
+	// create：全部参数透传，status 缺省 published
+	payload := envWikiCreatePage(env, wsHeaders(), map[string]any{
+		"slug": "entity/rag", "title": "RAG", "content": "# RAG",
+		"summary":    "RAG 检索增强生成概览页",
+		"page_type": "entity", "aliases": []any{"Retrieval Augmented Generation"},
+		"source_refs": []any{"11111111-2222-3333-4444-555555555555|RAG 论文"},
+		"folder_id":   "f-1",
+	})
+	if r := decodePayload(t, payload); !r.Success {
+		t.Fatalf("payload: %s", payload)
+	}
+	last := fake.wikiCreatePageCalls[len(fake.wikiCreatePageCalls)-1]
+	for _, k := range []string{"slug", "title", "content", "summary", "page_type", "status", "aliases", "source_refs", "folder_id"} {
+		if _, ok := last[k]; !ok {
+			t.Errorf("create body missing %q: %v", k, last)
+		}
+	}
+	if last["status"] != "published" {
+		t.Errorf("status default = %v, want published", last["status"])
+	}
+
+	// update：只传出现的字段
+	payload = envWikiUpdatePage(env, wsHeaders(), map[string]any{
+		"slug": "entity/rag", "content": "# new", "version": 3.0,
+	})
+	if r := decodePayload(t, payload); !r.Success {
+		t.Fatalf("payload: %s", payload)
+	}
+	if len(fake.wikiUpdateFields[0]) != 2 || fake.wikiUpdateFields[0]["version"] != 3.0 {
+		t.Errorf("update fields: %v", fake.wikiUpdateFields[0])
+	}
+
+	// delete / folder / move：参数记录 + 成功
+	payload = envWikiDeletePage(env, wsHeaders(), map[string]any{"slug": "entity/rag"})
+	if r := decodePayload(t, payload); !r.Success || fake.wikiDeleteSlugs[0] != "entity/rag" {
+		t.Fatalf("delete: %s", payload)
+	}
+	payload = envWikiCreateFolder(env, wsHeaders(), map[string]any{"name": "AI", "parent_id": "f-0"})
+	if r := decodePayload(t, payload); !r.Success || fake.wikiFolderName != "AI" || fake.wikiFolderParent != "f-0" {
+		t.Fatalf("folder: %s", payload)
+	}
+	payload = envWikiMovePage(env, wsHeaders(), map[string]any{"slug": "entity/rag", "folder_id": "f-1"})
+	if r := decodePayload(t, payload); !r.Success || fake.wikiMoveSlug != "entity/rag" || fake.wikiMoveFolder != "f-1" {
+		t.Fatalf("move: %s", payload)
+	}
+}
+
+func TestWikiWriteTools_Validation(t *testing.T) {
+	env := testEnv(&fakeWeKnoraCaller{})
+
+	// 缺必填 → MISSING_PARAM（create 无 slug、folder 无 name）
+	for _, args := range []map[string]any{
+		{"title": "T"},
+		{"slug": ""},
+	} {
+		if r := decodePayload(t, envWikiCreatePage(env, wsHeaders(), args)); r.ErrorCode != "MISSING_PARAM" {
+			t.Errorf("create %v: code = %q, want MISSING_PARAM", args, r.ErrorCode)
+		}
+	}
+	if r := decodePayload(t, envWikiCreateFolder(env, wsHeaders(), map[string]any{"parent_id": "f-0"})); r.ErrorCode != "MISSING_PARAM" {
+		t.Errorf("folder no name: %q", r.ErrorCode)
+	}
+
+	// page_type / status 白名单 → INVALID_PARAM_VALUE（create 与 update 都测）；
+	// 空串 = 缺省（不传），必须放行
+	for _, bad := range []string{"bogus", "Summary"} {
+		payload := envWikiCreatePage(env, wsHeaders(), map[string]any{"slug": "s", "page_type": bad})
+		if r := decodePayload(t, payload); r.ErrorCode != "INVALID_PARAM_VALUE" {
+			t.Errorf("page_type %q: code = %q", bad, r.ErrorCode)
+		}
+		payload = envWikiUpdatePage(env, wsHeaders(), map[string]any{"slug": "s", "page_type": bad})
+		if r := decodePayload(t, payload); r.ErrorCode != "INVALID_PARAM_VALUE" {
+			t.Errorf("update page_type %q: code = %q", bad, r.ErrorCode)
+		}
+	}
+	if r := decodePayload(t, envWikiCreatePage(env, wsHeaders(), map[string]any{"slug": "s", "page_type": ""})); !r.Success {
+		t.Error("empty page_type (= default) must pass")
+	}
+	for _, bad := range []string{"bogus", "Published"} {
+		payload := envWikiCreatePage(env, wsHeaders(), map[string]any{"slug": "s", "status": bad})
+		if r := decodePayload(t, payload); r.ErrorCode != "INVALID_PARAM_VALUE" {
+			t.Errorf("status %q: code = %q", bad, r.ErrorCode)
+		}
+	}
+
+	// source_refs 形状：空串条目、"|title"（ID 段空）、非字符串条目 → INVALID_PARAM_VALUE
+	for _, refs := range []any{
+		[]any{""},
+		[]any{"|论文标题"},
+		[]any{123},
+	} {
+		payload := envWikiCreatePage(env, wsHeaders(), map[string]any{"slug": "s", "source_refs": refs})
+		if r := decodePayload(t, payload); r.ErrorCode != "INVALID_PARAM_VALUE" {
+			t.Errorf("source_refs %v: code = %q, want INVALID_PARAM_VALUE", refs, r.ErrorCode)
+		}
+	}
+}
+
+func TestWikiWriteSlugTraversalRejected(t *testing.T) {
+	fake := &fakeWeKnoraCaller{}
+	env := testEnv(fake)
+	for _, slug := range []string{"../x", "a/../b", "entity/.", "./entity/x"} {
+		for _, tc := range []struct {
+			name string
+			call func(env *ServerEnv, hdr http.Header, args map[string]any) []byte
+		}{
+			{"create", envWikiCreatePage},
+			{"update", envWikiUpdatePage},
+			{"delete", envWikiDeletePage},
+			{"move", envWikiMovePage},
+		} {
+			args := map[string]any{"slug": slug, "title": "T", "content": "c"}
+			if tc.name == "move" {
+				args["folder_id"] = "f-1"
+			}
+			if r := decodePayload(t, tc.call(env, wsHeaders(), args)); r.ErrorCode != "INVALID_PARAM_VALUE" {
+				t.Fatalf("%s slug %q: code = %q, want INVALID_PARAM_VALUE", tc.name, slug, r.ErrorCode)
+			}
+		}
+	}
+	if len(fake.wikiCreatePageCalls) != 0 || len(fake.wikiUpdateSlugs) != 0 ||
+		len(fake.wikiDeleteSlugs) != 0 || fake.wikiMoveSlug != "" {
+		t.Fatal("rejected slugs reached the client")
+	}
+	// 结构性 / 仍然合法
+	payload := envWikiCreatePage(env, wsHeaders(), map[string]any{"slug": "entity/rag", "title": "T"})
+	if r := decodePayload(t, payload); !r.Success {
+		t.Fatalf("multi-segment slug must pass: %s", payload)
+	}
+}
+
+func TestWikiWrite_WeKnoraErrorPassthrough(t *testing.T) {
+	// fake 注入 *weknoraError → 统一 WEKNORA_API_FAILED + 状态/message 透传
+	env := testEnv(&fakeWeKnoraCaller{
+		wikiCreatePageErr: &weknoraError{Status: 500, Message: "UNIQUE constraint failed: idx_kb_slug"},
+	})
+	payload := envWikiCreatePage(env, wsHeaders(), map[string]any{"slug": "dup", "title": "T"})
+	r := decodePayload(t, payload)
+	if r.ErrorCode != "WEKNORA_API_FAILED" || !strings.Contains(r.Error, "HTTP 500") || !strings.Contains(r.Error, "idx_kb_slug") {
+		t.Fatalf("passthrough: %s", payload)
+	}
+}
+
+// 工具注册门控：EnableIngest=false 时 5 个新工具不出现在 tools/list
+func TestServer_WikiWriteToolsGating(t *testing.T) {
+	// disabled
+	ts := newTestServer(t, "", &fakeWeKnoraCaller{})
+	_, body := mcpCall(t, ts.URL, nil, `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)
+	for _, name := range []string{"wiki_create_page", "wiki_update_page", "wiki_delete_page", "wiki_create_folder", "wiki_move_page"} {
+		if strings.Contains(body, name) {
+			t.Fatalf("%s must not be registered when ingest disabled", name)
+		}
+	}
+	// enabled
+	env := testEnv(&fakeWeKnoraCaller{})
+	env.Config.EnableIngest = true
+	ts2 := httptest.NewServer(NewHandler(env, ""))
+	t.Cleanup(ts2.Close)
+	_, body2 := mcpCall(t, ts2.URL, nil, `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)
+	for _, name := range []string{"wiki_create_page", "wiki_update_page", "wiki_delete_page", "wiki_create_folder", "wiki_move_page"} {
+		if !strings.Contains(body2, name) {
+			t.Fatalf("%s missing from tools/list when enabled", name)
+		}
 	}
 }
 

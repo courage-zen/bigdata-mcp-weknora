@@ -137,6 +137,7 @@ func RegisterTools(server *mcp.Server, env *ServerEnv) {
 	addWikiTools(server, env)
 	if env.Config.EnableIngest {
 		addIngestTools(server, env)
+		addWikiWriteTools(server, env)
 	}
 }
 
@@ -291,6 +292,78 @@ func addIngestTools(server *mcp.Server, env *ServerEnv) {
 		Description: "Permanently delete a document and its index data from this workspace's weknora knowledge base.",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"knowledge_id":{"description":"document id (required)","anyOf":[{"type":"string"},{"type":"null"}]}}}`),
 	}, env.handleDeleteDocument)
+}
+
+// addWikiWriteTools registers the wiki write tools (create/update/delete
+// page, create folder, move page); only called when
+// env.Config.EnableIngest is set — wiki routes demand the same ingest
+// capability as document writes.
+func addWikiWriteTools(server *mcp.Server, env *ServerEnv) {
+	callTool(server, &mcp.Tool{
+		Name: "wiki_create_page",
+		Description: "Create a wiki page in this workspace's weknora knowledge base. " +
+			"Slugs are unique per knowledge base: creating a page whose slug already exists fails on the server. " +
+			"source_refs entries have the format \"<knowledge_id>\" or \"<knowledge_id>|<document title>\".",
+		InputSchema: json.RawMessage(`{
+	"type":"object",
+	"properties":{
+		"slug":{"description":"unique page slug, e.g. entity/acme or summary/<knowledge_id> (required)","anyOf":[{"type":"string"},{"type":"null"}]},
+		"title":{"description":"page title","anyOf":[{"type":"string"},{"type":"null"}]},
+		"content":{"description":"markdown content; [[slug|name]] links are parsed into the page graph","anyOf":[{"type":"string"},{"type":"null"}]},
+		"summary":{"description":"one-line summary for index listings","anyOf":[{"type":"string"},{"type":"null"}]},
+		"page_type":{"description":"one of summary, entity, concept, index, synthesis, comparison","anyOf":[{"type":"string"},{"type":"null"}]},
+		"status":{"description":"draft or published (default published)","anyOf":[{"type":"string"},{"type":"null"}]},
+		"aliases":{"description":"alternate names, abbreviations or translations","anyOf":[{"type":"array","items":{"type":"string"}},{"type":"null"}]},
+		"source_refs":{"description":"source documents the page summarizes, as \"<knowledge_id>\" or \"<knowledge_id>|<title>\"","anyOf":[{"type":"array","items":{"type":"string"}},{"type":"null"}]},
+		"folder_id":{"description":"parent folder id; empty means wiki root","anyOf":[{"type":"string"},{"type":"null"}]}
+	}
+}`),
+	}, env.handleWikiCreatePage)
+	callTool(server, &mcp.Tool{
+		Name:        "wiki_update_page",
+		Description: "Update a wiki page by slug. Absent fields keep their stored value (server-side merge semantics); " +
+			"version, when given, must match the page's current version or the update is rejected as a conflict.",
+		InputSchema: json.RawMessage(`{
+	"type":"object",
+	"properties":{
+		"slug":{"description":"page slug to update (required)","anyOf":[{"type":"string"},{"type":"null"}]},
+		"title":{"description":"new title; keeps the current title when omitted","anyOf":[{"type":"string"},{"type":"null"}]},
+		"content":{"description":"new markdown content; keeps the current content when omitted","anyOf":[{"type":"string"},{"type":"null"}]},
+		"summary":{"description":"new one-line summary; keeps the current summary when omitted","anyOf":[{"type":"string"},{"type":"null"}]},
+		"page_type":{"description":"one of summary, entity, concept, index, synthesis, comparison","anyOf":[{"type":"string"},{"type":"null"}]},
+		"status":{"description":"one of draft, published, archived","anyOf":[{"type":"string"},{"type":"null"}]},
+		"aliases":{"description":"replacement alias list (whole-list replace)","anyOf":[{"type":"array","items":{"type":"string"}},{"type":"null"}]},
+		"version":{"description":"current page version for optimistic locking; 0/omitted skips the check","anyOf":[{"type":"number"},{"type":"null"}]}
+	}
+}`),
+	}, env.handleWikiUpdatePage)
+	callTool(server, &mcp.Tool{
+		Name:        "wiki_delete_page",
+		Description: "Permanently delete a wiki page by slug (hard delete; fails with 404 when the page does not exist).",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"slug":{"description":"page slug to delete (required)","anyOf":[{"type":"string"},{"type":"null"}]}}}`),
+	}, env.handleWikiDeletePage)
+	callTool(server, &mcp.Tool{
+		Name:        "wiki_create_folder",
+		Description: "Create a wiki folder (directory node) in this workspace's knowledge base; returns the folder with its id.",
+		InputSchema: json.RawMessage(`{
+	"type":"object",
+	"properties":{
+		"name":{"description":"folder name (required)","anyOf":[{"type":"string"},{"type":"null"}]},
+		"parent_id":{"description":"parent folder id; empty means top level","anyOf":[{"type":"string"},{"type":"null"}]}
+	}
+}`),
+	}, env.handleWikiCreateFolder)
+	callTool(server, &mcp.Tool{
+		Name:        "wiki_move_page",
+		Description: "Move a wiki page into a folder (or to the wiki root with an empty folder_id); the folder id comes from wiki_create_folder or the wiki index.",
+		InputSchema: json.RawMessage(`{
+	"type":"object",
+	"properties":{
+		"slug":{"description":"page slug to move (required)","anyOf":[{"type":"string"},{"type":"null"}]},
+		"folder_id":{"description":"target folder id; empty means wiki root","anyOf":[{"type":"string"},{"type":"null"}]}
+	}
+}`),
+	}, env.handleWikiMovePage)
 }
 
 func (env *ServerEnv) handleListKnowledgeBases(ctx context.Context, hdr http.Header, args map[string]any) []byte {
@@ -575,6 +648,292 @@ func (env *ServerEnv) handleWikiIndex(ctx context.Context, hdr http.Header, args
 		return mapWeKnoraError(err, mc)
 	}
 	return successPayload(idx, mc)
+}
+
+// wikiPageTypes / wikiPageStatuses mirror WeKnora's IsValidWikiPageType /
+// IsValidWikiPageStatus whitelists (types/wiki_page.go) — refusing invalid
+// values here keeps the server's 400 shape out of the tool's way.
+var wikiPageTypes = map[string]bool{
+	"summary": true, "entity": true, "concept": true, "index": true,
+	"synthesis": true, "comparison": true,
+}
+
+var wikiPageStatuses = map[string]bool{
+	"draft": true, "published": true, "archived": true,
+}
+
+// validateWikiSlugParam runs the shared slug guards: required, non-blank,
+// traversal-free.
+func validateWikiSlugParam(mc map[string]string, args map[string]any) (string, []byte) {
+	slug, _ := args["slug"].(string)
+	if strings.TrimSpace(slug) == "" {
+		return "", errPayload(errCodeMissingParam, "parameter \"slug\" is required", mc)
+	}
+	slug = strings.TrimSpace(slug)
+	if err := validateWikiSlug(slug); err != nil {
+		return "", errPayload(errCodeInvalidParamValue, err.Error(), mc)
+	}
+	return slug, nil
+}
+
+// optionalStringArg pulls an optional string arg: absent, null and blank all
+// count as absent; a non-string value is an INVALID_PARAM_TYPE error.
+func optionalStringArg(mc map[string]string, args map[string]any, name string) (string, bool, []byte) {
+	v, present := args[name]
+	if !present || v == nil {
+		return "", false, nil
+	}
+	s, ok := v.(string)
+	if !ok {
+		return "", false, errPayload(errCodeInvalidParamType, fmt.Sprintf("parameter %q must be a string", name), mc)
+	}
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", false, nil
+	}
+	return s, true, nil
+}
+
+func (env *ServerEnv) handleWikiCreatePage(ctx context.Context, hdr http.Header, args map[string]any) []byte {
+	mc := MulticaContextFromHeaders(hdr)
+	m, fail := env.resolveMapping(mc)
+	if fail != nil {
+		return fail
+	}
+	slug, fail := validateWikiSlugParam(mc, args)
+	if fail != nil {
+		return fail
+	}
+	page := map[string]any{"slug": slug}
+
+	for _, name := range []string{"title", "content", "summary", "folder_id"} {
+		s, present, fail := optionalStringArg(mc, args, name)
+		if fail != nil {
+			return fail
+		}
+		if present {
+			page[name] = s
+		}
+	}
+
+	// page_type: whitelist; absent or blank = let the server default
+	if v, present := args["page_type"]; present && v != nil {
+		pt, ok := v.(string)
+		if !ok {
+			return errPayload(errCodeInvalidParamType, "parameter \"page_type\" must be a string", mc)
+		}
+		if pt = strings.TrimSpace(pt); pt != "" && !wikiPageTypes[pt] {
+			return errPayload(errCodeInvalidParamValue, "parameter \"page_type\" must be one of summary, entity, concept, index, synthesis, comparison", mc)
+		}
+		if pt != "" {
+			page["page_type"] = pt
+		}
+	}
+
+	// status: whitelist, absent = published (WeKnora's default)
+	status := "published"
+	if v, present := args["status"]; present && v != nil {
+		st, ok := v.(string)
+		if !ok {
+			return errPayload(errCodeInvalidParamType, "parameter \"status\" must be a string", mc)
+		}
+		if !wikiPageStatuses[strings.TrimSpace(st)] {
+			return errPayload(errCodeInvalidParamValue, "parameter \"status\" must be one of draft, published, archived", mc)
+		}
+		status = strings.TrimSpace(st)
+	}
+	page["status"] = status
+
+	if v, present := args["aliases"]; present && v != nil {
+		if _, ok := v.([]any); !ok {
+			return errPayload(errCodeInvalidParamType, "parameter \"aliases\" must be an array of strings", mc)
+		}
+		page["aliases"] = stringSlice(v)
+	}
+
+	if v, present := args["source_refs"]; present && v != nil {
+		list, ok := v.([]any)
+		if !ok {
+			return errPayload(errCodeInvalidParamType, "parameter \"source_refs\" must be an array of strings", mc)
+		}
+		refs := make([]string, 0, len(list))
+		for _, item := range list {
+			ref, ok := item.(string)
+			if !ok {
+				return errPayload(errCodeInvalidParamValue,
+					fmt.Sprintf("parameter \"source_refs\" entries must be \"<knowledge_id>\" or \"<knowledge_id>|<title>\", got %v", item), mc)
+			}
+			refs = append(refs, strings.TrimSpace(ref))
+		}
+		for _, ref := range refs {
+			id, _ := splitWikiSourceRef(ref)
+			if id == "" {
+				return errPayload(errCodeInvalidParamValue,
+					fmt.Sprintf("parameter \"source_refs\" entries must be \"<knowledge_id>\" or \"<knowledge_id>|<title>\", got %q", ref), mc)
+			}
+		}
+		page["source_refs"] = refs
+	}
+
+	created, err := env.WeKnora.WikiCreatePage(ctx, m, page)
+	if err != nil {
+		return mapWeKnoraError(err, mc)
+	}
+	return successPayload(created, mc)
+}
+
+// splitWikiSourceRef mirrors WeKnora's ParseWikiSourceRef: the first "|"
+// splits the knowledge id from the optional display title.
+func splitWikiSourceRef(ref string) (id, title string) {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return "", ""
+	}
+	i := strings.IndexByte(ref, '|')
+	if i < 0 {
+		return ref, ""
+	}
+	return strings.TrimSpace(ref[:i]), strings.TrimSpace(ref[i+1:])
+}
+
+func (env *ServerEnv) handleWikiUpdatePage(ctx context.Context, hdr http.Header, args map[string]any) []byte {
+	mc := MulticaContextFromHeaders(hdr)
+	m, fail := env.resolveMapping(mc)
+	if fail != nil {
+		return fail
+	}
+	slug, fail := validateWikiSlugParam(mc, args)
+	if fail != nil {
+		return fail
+	}
+	// Only present fields go into the request body: the server treats absent
+	// fields as "keep the stored value", so a field must never travel as a
+	// zero value.
+	fields := map[string]any{}
+
+	for _, name := range []string{"title", "content", "summary"} {
+		s, present, fail := optionalStringArg(mc, args, name)
+		if fail != nil {
+			return fail
+		}
+		if present {
+			fields[name] = s
+		}
+	}
+
+	if v, present := args["page_type"]; present && v != nil {
+		pt, ok := v.(string)
+		if !ok {
+			return errPayload(errCodeInvalidParamType, "parameter \"page_type\" must be a string", mc)
+		}
+		// blank = absent: the field is not sent and keeps its stored value
+		if pt = strings.TrimSpace(pt); pt != "" {
+			if !wikiPageTypes[pt] {
+				return errPayload(errCodeInvalidParamValue, "parameter \"page_type\" must be one of summary, entity, concept, index, synthesis, comparison", mc)
+			}
+			fields["page_type"] = pt
+		}
+	}
+
+	if v, present := args["status"]; present && v != nil {
+		st, ok := v.(string)
+		if !ok {
+			return errPayload(errCodeInvalidParamType, "parameter \"status\" must be a string", mc)
+		}
+		if !wikiPageStatuses[strings.TrimSpace(st)] {
+			return errPayload(errCodeInvalidParamValue, "parameter \"status\" must be one of draft, published, archived", mc)
+		}
+		fields["status"] = strings.TrimSpace(st)
+	}
+
+	if v, present := args["aliases"]; present && v != nil {
+		if _, ok := v.([]any); !ok {
+			return errPayload(errCodeInvalidParamType, "parameter \"aliases\" must be an array of strings", mc)
+		}
+		fields["aliases"] = stringSlice(v)
+	}
+
+	if v, present := args["version"]; present && v != nil {
+		f, ok := v.(float64)
+		// kept as float64: json marshals whole numbers without a decimal
+		// point, so the wire format matches the server's int field
+		if !ok || f < 0 || f != float64(int(f)) {
+			return errPayload(errCodeInvalidParamType, "parameter \"version\" must be a non-negative integer", mc)
+		}
+		fields["version"] = f
+	}
+
+	updated, err := env.WeKnora.WikiUpdatePage(ctx, m, slug, fields)
+	if err != nil {
+		return mapWeKnoraError(err, mc)
+	}
+	return successPayload(updated, mc)
+}
+
+func (env *ServerEnv) handleWikiDeletePage(ctx context.Context, hdr http.Header, args map[string]any) []byte {
+	mc := MulticaContextFromHeaders(hdr)
+	m, fail := env.resolveMapping(mc)
+	if fail != nil {
+		return fail
+	}
+	slug, fail := validateWikiSlugParam(mc, args)
+	if fail != nil {
+		return fail
+	}
+	if err := env.WeKnora.WikiDeletePage(ctx, m, slug); err != nil {
+		return mapWeKnoraError(err, mc)
+	}
+	return successPayload(map[string]any{"deleted": true, "slug": slug}, mc)
+}
+
+func (env *ServerEnv) handleWikiCreateFolder(ctx context.Context, hdr http.Header, args map[string]any) []byte {
+	mc := MulticaContextFromHeaders(hdr)
+	m, fail := env.resolveMapping(mc)
+	if fail != nil {
+		return fail
+	}
+	name, _ := args["name"].(string)
+	if strings.TrimSpace(name) == "" {
+		return errPayload(errCodeMissingParam, "parameter \"name\" is required", mc)
+	}
+	parentID, present, fail := optionalStringArg(mc, args, "parent_id")
+	if fail != nil {
+		return fail
+	}
+	if !present {
+		parentID = ""
+	}
+	folder, err := env.WeKnora.WikiCreateFolder(ctx, m, strings.TrimSpace(name), parentID)
+	if err != nil {
+		return mapWeKnoraError(err, mc)
+	}
+	return successPayload(folder, mc)
+}
+
+func (env *ServerEnv) handleWikiMovePage(ctx context.Context, hdr http.Header, args map[string]any) []byte {
+	mc := MulticaContextFromHeaders(hdr)
+	m, fail := env.resolveMapping(mc)
+	if fail != nil {
+		return fail
+	}
+	slug, fail := validateWikiSlugParam(mc, args)
+	if fail != nil {
+		return fail
+	}
+	// empty folder_id is meaningful: it moves the page to the wiki root
+	folderID, _ := args["folder_id"].(string)
+	if v, present := args["folder_id"]; present && v != nil {
+		s, ok := v.(string)
+		if !ok {
+			return errPayload(errCodeInvalidParamType, "parameter \"folder_id\" must be a string", mc)
+		}
+		folderID = s
+	}
+	page, err := env.WeKnora.WikiMovePage(ctx, m, slug, folderID)
+	if err != nil {
+		return mapWeKnoraError(err, mc)
+	}
+	return successPayload(page, mc)
 }
 
 func (env *ServerEnv) handleAddDocument(ctx context.Context, hdr http.Header, args map[string]any) []byte {
