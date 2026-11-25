@@ -26,6 +26,15 @@ type fakeWeKnoraCaller struct {
 	wikiSearchLimit  int
 	wikiIndexLimit   int
 	wikiReadSlugs    []string
+	// wiki write recording fields
+	wikiCreatePageCalls []map[string]any
+	wikiUpdateSlugs     []string
+	wikiUpdateFields    []map[string]any
+	wikiDeleteSlugs     []string
+	wikiFolderName      string
+	wikiFolderParent    string
+	wikiMoveSlug        string
+	wikiMoveFolder      string
 	addManualTitle   string
 	addManualContent string
 	addManualPub     bool
@@ -72,6 +81,35 @@ func (f *fakeWeKnoraCaller) WikiReadPage(ctx context.Context, m *WorkspaceMappin
 func (f *fakeWeKnoraCaller) WikiIndex(ctx context.Context, m *WorkspaceMapping, limit int) (map[string]any, error) {
 	f.wikiIndexLimit = limit
 	return map[string]any{"intro": "i"}, nil
+}
+func (f *fakeWeKnoraCaller) WikiCreatePage(ctx context.Context, m *WorkspaceMapping, page map[string]any) (map[string]any, error) {
+	call := make(map[string]any, len(page))
+	for k, v := range page {
+		call[k] = v
+	}
+	f.wikiCreatePageCalls = append(f.wikiCreatePageCalls, call)
+	return map[string]any{"slug": page["slug"], "version": 2}, nil
+}
+func (f *fakeWeKnoraCaller) WikiUpdatePage(ctx context.Context, m *WorkspaceMapping, slug string, fields map[string]any) (map[string]any, error) {
+	call := make(map[string]any, len(fields))
+	for k, v := range fields {
+		call[k] = v
+	}
+	f.wikiUpdateSlugs = append(f.wikiUpdateSlugs, slug)
+	f.wikiUpdateFields = append(f.wikiUpdateFields, call)
+	return map[string]any{"slug": slug, "version": 2}, nil
+}
+func (f *fakeWeKnoraCaller) WikiDeletePage(ctx context.Context, m *WorkspaceMapping, slug string) error {
+	f.wikiDeleteSlugs = append(f.wikiDeleteSlugs, slug)
+	return nil
+}
+func (f *fakeWeKnoraCaller) WikiCreateFolder(ctx context.Context, m *WorkspaceMapping, name, parentID string) (map[string]any, error) {
+	f.wikiFolderName, f.wikiFolderParent = name, parentID
+	return map[string]any{"id": "f-1", "name": name}, nil
+}
+func (f *fakeWeKnoraCaller) WikiMovePage(ctx context.Context, m *WorkspaceMapping, slug, folderID string) (map[string]any, error) {
+	f.wikiMoveSlug, f.wikiMoveFolder = slug, folderID
+	return map[string]any{"slug": slug, "folder_id": folderID}, nil
 }
 func (f *fakeWeKnoraCaller) AddManualDocument(ctx context.Context, m *WorkspaceMapping, title, content string, publish bool) (json.RawMessage, error) {
 	f.addManualTitle, f.addManualContent, f.addManualPub = title, content, publish

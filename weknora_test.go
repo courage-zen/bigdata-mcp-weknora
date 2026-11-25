@@ -140,6 +140,116 @@ func TestWeKnoraClient_WikiPaths(t *testing.T) {
 	}
 }
 
+// bodyCapture captures the JSON body of any request into got and returns a
+// client+mapping pair against a canned-OK server.
+func bodyCapture(t *testing.T, got *map[string]any) (*weknoraClient, *WorkspaceMapping) {
+	t.Helper()
+	return fakeWeKnora(t, func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(got)
+		io.WriteString(w, `{"slug":"s","version":2}`)
+	})
+}
+
+// TestWeKnoraClient_WikiWritePaths pins the wiki write endpoints against the
+// WeKnora routes: pages live under /knowledgebase/:id/wiki/{pages,move-page,
+// folders} — singular knowledgebase, and move-page is a PUT with the slug in
+// the body (registered in routes_knowledge.go:354-372), unlike the document
+// routes' hyphenated knowledge-bases prefix.
+func TestWeKnoraClient_WikiWritePaths(t *testing.T) {
+	var gotPath, gotMethod string
+	respond := func(w http.ResponseWriter, body string) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, body)
+	}
+	c, m := fakeWeKnora(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotMethod = r.URL.Path, r.Method
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/wiki/folders"):
+			respond(w, `{"id":"f-1","name":"AI"}`)
+		case strings.HasSuffix(r.URL.Path, "/wiki/move-page"):
+			respond(w, `{"slug":"entity/rag","folder_id":"f-1"}`)
+		case r.Method == http.MethodDelete:
+			w.WriteHeader(http.StatusNoContent)
+		default: // create/update page
+			respond(w, `{"slug":"entity/rag","title":"RAG","version":2}`)
+		}
+	})
+
+	if _, err := c.WikiCreatePage(context.Background(), m, map[string]any{"slug": "entity/rag", "title": "RAG", "content": "# RAG"}); err != nil {
+		t.Fatal(err)
+	}
+	if want := "/api/v1/knowledgebase/kb-1/wiki/pages"; gotPath != want || gotMethod != "POST" {
+		t.Fatalf("create: %s %s, want POST %s", gotMethod, gotPath, want)
+	}
+
+	if _, err := c.WikiUpdatePage(context.Background(), m, "entity/rag", map[string]any{"content": "# new", "version": 2.0}); err != nil {
+		t.Fatal(err)
+	}
+	if want := "/api/v1/knowledgebase/kb-1/wiki/pages/entity/rag"; gotPath != want || gotMethod != "PUT" {
+		t.Fatalf("update: %s %s, want PUT %s", gotMethod, gotPath, want)
+	}
+
+	if err := c.WikiDeletePage(context.Background(), m, "entity/rag"); err != nil {
+		t.Fatal(err)
+	}
+	if want := "/api/v1/knowledgebase/kb-1/wiki/pages/entity/rag"; gotPath != want || gotMethod != "DELETE" {
+		t.Fatalf("delete: %s %s, want DELETE %s", gotMethod, gotPath, want)
+	}
+
+	if _, err := c.WikiCreateFolder(context.Background(), m, "AI", ""); err != nil {
+		t.Fatal(err)
+	}
+	if want := "/api/v1/knowledgebase/kb-1/wiki/folders"; gotPath != want || gotMethod != "POST" {
+		t.Fatalf("folder: %s %s, want POST %s", gotMethod, gotPath, want)
+	}
+
+	if _, err := c.WikiMovePage(context.Background(), m, "entity/rag", "f-1"); err != nil {
+		t.Fatal(err)
+	}
+	if want := "/api/v1/knowledgebase/kb-1/wiki/move-page"; gotPath != want || gotMethod != "PUT" {
+		t.Fatalf("move: %s %s, want PUT %s", gotMethod, gotPath, want)
+	}
+}
+
+// The server merges WikiPageUpdateRequest pointer fields: absent fields keep
+// their stored value, so the client must not serialize fields the caller did
+// not send — sending them (even as zero values) would clobber real data.
+func TestWeKnoraClient_WikiUpdateOmitsAbsentFields(t *testing.T) {
+	var gotBody map[string]any
+	c, m := fakeWeKnora(t, func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&gotBody)
+		io.WriteString(w, `{"slug":"s","version":2}`)
+	})
+	c.WikiUpdatePage(context.Background(), m, "s", map[string]any{"content": "# new"})
+	for _, absent := range []string{"title", "summary", "status", "page_type", "aliases", "version"} {
+		if _, ok := gotBody[absent]; ok {
+			t.Errorf("absent field %q must not be sent: %v", absent, gotBody)
+		}
+	}
+	if gotBody["content"] != "# new" {
+		t.Errorf("content = %v", gotBody["content"])
+	}
+}
+
+func TestWeKnoraClient_WikiCreatePageSendsAllParams(t *testing.T) {
+	var gotBody map[string]any
+	c, m := bodyCapture(t, &gotBody)
+	if _, err := c.WikiCreatePage(context.Background(), m, map[string]any{
+		"slug": "entity/rag", "title": "RAG", "content": "c", "summary": "s",
+		"page_type": "entity", "status": "published",
+		"aliases":   []any{"Retrieval Augmented Generation"},
+		"source_refs": []any{"k-1|RAG 论文"},
+		"folder_id":    "f-1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"slug", "title", "content", "summary", "page_type", "status", "aliases", "source_refs", "folder_id"} {
+		if _, ok := gotBody[k]; !ok {
+			t.Errorf("body missing %q: %v", k, gotBody)
+		}
+	}
+}
+
 func TestWeKnoraClient_MultipartFileUpload(t *testing.T) {
 	c, m := fakeWeKnora(t, func(w http.ResponseWriter, r *http.Request) {
 		if err := r.ParseMultipartForm(10 << 20); err != nil {

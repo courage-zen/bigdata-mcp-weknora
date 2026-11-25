@@ -41,6 +41,11 @@ type WeKnoraCaller interface {
 	WikiSearch(ctx context.Context, m *WorkspaceMapping, q string, limit int) ([]json.RawMessage, error)
 	WikiReadPage(ctx context.Context, m *WorkspaceMapping, slug string) (map[string]any, error)
 	WikiIndex(ctx context.Context, m *WorkspaceMapping, limit int) (map[string]any, error)
+	WikiCreatePage(ctx context.Context, m *WorkspaceMapping, page map[string]any) (map[string]any, error)
+	WikiUpdatePage(ctx context.Context, m *WorkspaceMapping, slug string, fields map[string]any) (map[string]any, error)
+	WikiDeletePage(ctx context.Context, m *WorkspaceMapping, slug string) error
+	WikiCreateFolder(ctx context.Context, m *WorkspaceMapping, name, parentID string) (map[string]any, error)
+	WikiMovePage(ctx context.Context, m *WorkspaceMapping, slug, folderID string) (map[string]any, error)
 	AddManualDocument(ctx context.Context, m *WorkspaceMapping, title, content string, publish bool) (json.RawMessage, error)
 	AddURLDocument(ctx context.Context, m *WorkspaceMapping, docURL, title string) (json.RawMessage, error)
 	AddFileDocument(ctx context.Context, m *WorkspaceMapping, filename string, content []byte, contentType string) (json.RawMessage, error)
@@ -252,6 +257,74 @@ func (w *weknoraClient) WikiIndex(ctx context.Context, m *WorkspaceMapping, limi
 		return nil, fmt.Errorf("decode weknora wiki index: %w", err)
 	}
 	return idx, nil
+}
+
+// WikiCreatePage posts a full page (slug/title/content/summary/page_type/
+// status/aliases/source_refs/folder_id) — the body is the caller-built map,
+// so absent fields simply stay absent.
+func (w *weknoraClient) WikiCreatePage(ctx context.Context, m *WorkspaceMapping, page map[string]any) (map[string]any, error) {
+	raw, err := w.doJSON(ctx, m, http.MethodPost, "/api/v1/knowledgebase/"+pathSegments(m.KBID)+"/wiki/pages", page)
+	if err != nil {
+		return nil, err
+	}
+	var created map[string]any
+	if err := json.Unmarshal(raw, &created); err != nil {
+		return nil, fmt.Errorf("decode weknora wiki page: %w", err)
+	}
+	return created, nil
+}
+
+// WikiUpdatePage merges fields onto an existing page. The server treats
+// absent request fields as "keep the stored value", so fields must only be
+// present when the caller sent them.
+func (w *weknoraClient) WikiUpdatePage(ctx context.Context, m *WorkspaceMapping, slug string, fields map[string]any) (map[string]any, error) {
+	raw, err := w.doJSON(ctx, m, http.MethodPut, "/api/v1/knowledgebase/"+pathSegments(m.KBID)+"/wiki/pages/"+pathSegments(slug), fields)
+	if err != nil {
+		return nil, err
+	}
+	var updated map[string]any
+	if err := json.Unmarshal(raw, &updated); err != nil {
+		return nil, fmt.Errorf("decode weknora wiki page: %w", err)
+	}
+	return updated, nil
+}
+
+func (w *weknoraClient) WikiDeletePage(ctx context.Context, m *WorkspaceMapping, slug string) error {
+	_, err := w.do(ctx, m, http.MethodDelete, "/api/v1/knowledgebase/"+pathSegments(m.KBID)+"/wiki/pages/"+pathSegments(slug), "", nil)
+	return err
+}
+
+func (w *weknoraClient) WikiCreateFolder(ctx context.Context, m *WorkspaceMapping, name, parentID string) (map[string]any, error) {
+	raw, err := w.doJSON(ctx, m, http.MethodPost, "/api/v1/knowledgebase/"+pathSegments(m.KBID)+"/wiki/folders", map[string]any{
+		"name":      name,
+		"parent_id": parentID,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var folder map[string]any
+	if err := json.Unmarshal(raw, &folder); err != nil {
+		return nil, fmt.Errorf("decode weknora wiki folder: %w", err)
+	}
+	return folder, nil
+}
+
+// WikiMovePage relocates a page into a folder; folderID "" moves it to the
+// wiki root. The slug travels in the body (not the path) because slugs are
+// hierarchical and would collide with the catch-all /pages/{slug} route.
+func (w *weknoraClient) WikiMovePage(ctx context.Context, m *WorkspaceMapping, slug, folderID string) (map[string]any, error) {
+	raw, err := w.doJSON(ctx, m, http.MethodPut, "/api/v1/knowledgebase/"+pathSegments(m.KBID)+"/wiki/move-page", map[string]any{
+		"slug":      slug,
+		"folder_id": folderID,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var page map[string]any
+	if err := json.Unmarshal(raw, &page); err != nil {
+		return nil, fmt.Errorf("decode weknora wiki page: %w", err)
+	}
+	return page, nil
 }
 
 func (w *weknoraClient) AddManualDocument(ctx context.Context, m *WorkspaceMapping, title, content string, publish bool) (json.RawMessage, error) {
